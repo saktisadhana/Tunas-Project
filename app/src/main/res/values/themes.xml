@@ -1,0 +1,39 @@
+<resources>
+    <style name="Theme.Tunas" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <item name="colorPrimary">@color/tunas_olive</item>
+        <item name="colorPrimaryVariant">@color/tunas_forest</item>
+        <item name="colorOnPrimary">@color/tunas_cream</item>
+        <item name="colorSecondary">@color/tunas_forest</item>
+        <item name="android:fontFamily">@font/signika_negative</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowBackground">@color/tunas_cream</item>
+        <item name="android:colorAccent">@color/tunas_forest</item>
+        <item name="materialAlertDialogTheme">@style/ThemeOverlay.Tunas.Dialog</item>
+    </style>
+
+    <style name="ThemeOverlay.Tunas.Dialog" parent="ThemeOverlay.MaterialComponents.MaterialAlertDialog">
+        <item name="colorSurface">@color/tunas_surface</item>
+        <item name="colorOnSurface">@color/tunas_forest</item>
+        <item name="colorPrimary">@color/tunas_olive</item>
+        <item name="shapeAppearanceOverlay">@style/ShapeAppearance.Tunas.Dialog</item>
+        <item name="materialAlertDialogTitleTextStyle">@style/Tunas.DialogTitle</item>
+        <item name="buttonBarPositiveButtonStyle">@style/Tunas.DialogButton</item>
+        <item name="buttonBarNegativeButtonStyle">@style/Tunas.DialogButton</item>
+    </style>
+    <style name="ShapeAppearance.Tunas.Dialog" parent="">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">20dp</item>
+    </style>
+    <style name="Tunas.DialogTitle" parent="MaterialAlertDialog.MaterialComponents.Title.Text">
+        <item name="android:fontFamily">@font/merriweather_sans</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/tunas_forest</item>
+    </style>
+    <style name="Tunas.DialogButton" parent="Widget.MaterialComponents.Button.TextButton.Dialog">
+        <item name="android:textColor">@color/tunas_olive</item>
+        <item name="android:fontFamily">@font/merriweather_sans</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+</resources>

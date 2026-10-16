@@ -1,0 +1,10 @@
+<resources>
+    <item name="full_name" type="id" />
+    <item name="email" type="id" />
+    <item name="plant_nickname" type="id" />
+    <item name="water_interval" type="id" />
+    <item name="room_name" type="id" />
+    <item name="room_light" type="id" />
+    <item name="plant_room" type="id" />
+    <item name="plant_search" type="id" />
+</resources>

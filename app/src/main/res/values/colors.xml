@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="tunas_cream">#EFEECF</color>
+    <color name="tunas_surface">#ECEBD7</color>
+    <color name="tunas_olive">#454D39</color>
+    <color name="tunas_forest">#3B5142</color>
+    <color name="tunas_sage">#A2B595</color>
+    <color name="tunas_muted">#59664F</color>
+    <color name="tunas_error">#8B352C</color>
+</resources>

@@ -1,0 +1,11 @@
+<svg preserveAspectRatio="none" overflow="visible" style="display: block;" width="62" height="62" viewBox="0 0 62 62" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="carbon:skill-level-advanced">
+<path id="Vector" d="M58.125 58.125H42.625V7.75H58.125V58.125ZM38.75 58.125H23.25V23.25H38.75V58.125ZM19.375 58.125H3.875V34.875H19.375V58.125Z" fill="url(#paint0_linear_0_5)"/>
+</g>
+<defs>
+<linearGradient id="paint0_linear_0_5" x1="31.1273" y1="125.816" x2="12.1788" y2="10.8521" gradientUnits="userSpaceOnUse">
+<stop stop-color="#A2B595"/>
+<stop offset="1" stop-color="#3B5142"/>
+</linearGradient>
+</defs>
+</svg>

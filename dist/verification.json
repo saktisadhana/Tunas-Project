@@ -1,0 +1,20 @@
+{
+  "apk": "Tunas-debug.apk",
+  "bytes": 15060707,
+  "sha256": "97515824aae4bb14772b032abc0347c45b740916b89fce845624646f73591aa4",
+  "unit_tests": {
+    "tests": 50,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "instrumented_tests_passed": 10,
+  "lint": {
+    "Error": 0,
+    "Fatal": 0,
+    "Warning": 28
+  },
+  "physical_device_tested": false,
+  "cloud_auth_connected": false,
+  "iot_contract": "Provisional BLE GATT; firmware alignment and hardware commissioning required"
+}
