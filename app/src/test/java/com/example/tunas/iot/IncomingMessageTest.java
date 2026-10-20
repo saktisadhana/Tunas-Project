@@ -46,4 +46,17 @@ public class IncomingMessageTest {
         fields.put("humidity", 101);
         assertThrows(IllegalArgumentException.class, () -> IncomingMessage.decode(fields, 100));
     }
+
+    @Test public void optionalSoilChemistryCanBeTheOnlyMeasurement() {
+        Map<String, Object> fields = new HashMap<>();
+        fields.put("type", "telemetry");
+        fields.put("ph", 6.2);
+        fields.put("tds", 180);
+        IncomingMessage message = IncomingMessage.decode(fields, 8);
+        assertEquals(6.2, message.telemetry.ph, 0.0);
+        assertEquals(180.0, message.telemetry.tds, 0.0);
+        assertNull(message.telemetry.moisture);
+        fields.put("potassium", 2000.1);
+        assertThrows(IllegalArgumentException.class, () -> IncomingMessage.decode(fields, 8));
+    }
 }

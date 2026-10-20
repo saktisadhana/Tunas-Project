@@ -25,9 +25,12 @@ final class IncomingMessage {
         if (!"telemetry".equals(fields.get("type"))) throw new IllegalArgumentException("Unknown frame type");
         Telemetry t = new Telemetry(number(fields, "health"), number(fields, "moisture"),
                 number(fields, "nutrient"), number(fields, "sunlight"),
-                number(fields, "temperature"), number(fields, "humidity"), receivedAt);
+                number(fields, "temperature"), number(fields, "humidity"),
+                number(fields, "ph"), number(fields, "tds"), number(fields, "nitrogen"),
+                number(fields, "phosphorus"), number(fields, "potassium"), receivedAt);
         if (t.health == null && t.moisture == null && t.nutrient == null && t.sunlight == null
-                && t.temperature == null && t.humidity == null) {
+                && t.temperature == null && t.humidity == null && t.ph == null && t.tds == null
+                && t.nitrogen == null && t.phosphorus == null && t.potassium == null) {
             throw new IllegalArgumentException("Empty telemetry");
         }
         return new IncomingMessage(t, null, false);

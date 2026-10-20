@@ -23,7 +23,8 @@ Cream/olive/sage colors, Merriweather Sans and Signika Negative, the wordmark, p
 - Log manual watering with confirmation; inspect persisted care schedules.
 - Add rooms, expand/collapse controls, assign a sensor and safely reject occupied-room deletion.
 - Native Bluetooth permission request, scan, select a real advertisement, connect GATT, subscribe to telemetry and assign the connection to a room.
-- Manual watering/nutrition/target commands require an assigned connection, fresh telemetry and explicit confirmation. Device acknowledgement is required; offline actions never display fake success.
+- Connect the same pot over MQTT (TLS, port 8883) from outside the LAN. Broker host, port, username, password and device ID are entered in the app and stored in encrypted preferences. BLE remains the nearby fallback. The Maintenance header shows **BLE**, **MQTT** or **Offline**.
+- Manual watering/nutrition/target commands require an assigned connection, fresh telemetry and explicit confirmation on either transport. Device acknowledgement is required; a broker login without the pot online, and any offline action, never display fake success.
 - Form drafts survive Activity recreation. Adding a room from the plant editor preserves that editor's current inputs.
 
 First launch has no saved plants, rooms or sensor readings. Library entries are reference material, not user records. Screenshots in `dist/` use a test profile/room and an offline sensor state.
@@ -32,15 +33,27 @@ First launch has no saved plants, rooms or sensor readings. Library entries are 
 
 **Cloud account authentication and sync:** no backend was supplied. Email identifies a profile on this phone only; it is not verified authentication. There are no fake social login, password reset or remote push controls. Local data is app-private, with backup and device-transfer exclusions.
 
-**Physical hardware compatibility:** BLE transport is implemented, but no actual sensor was available. UUIDs and the message schema are a **proposed firmware contract**, not a claim about an existing device. Align firmware with `docs/IOT_PROTOCOL.md` before commissioning. Do not connect actuators until device-side authentication, maximum-run watchdogs, electrical safety and stop-on-disconnect behavior have been verified. The app has no automatic command replay or unattended watering scheduler.
+**Physical hardware compatibility:** BLE and MQTT transports are implemented, but no actual sensor was commissioned. UUIDs, topics and the message schema are a **proposed firmware contract**, not a claim about an existing device. Align firmware with `docs/IOT_PROTOCOL.md`. `firmware/tunas_pot/` is a reference ESP32 sketch (telemetry, commands, retained last will, 30-second pump cap) with empty placeholders, not a flashed or electrically verified board. Do not connect actuators until device-side authentication, maximum-run watchdogs, electrical safety and stop-on-disconnect behavior have been verified. The app has no automatic command replay or unattended watering scheduler. MQTT reaches a broker you choose; it is not a Tunas account or sync service.
 
 ## Structure
 
-- `MainActivity.java`: screen host, safe-area handling, navigation and BLE lifecycle.
-- `GardenPages.java`: native plant, room, profile, schedule and pairing screens.
+- `MainActivity.java`: screen host, safe-area handling, navigation, and BLE/MQTT lifecycle.
+- `GardenPages.java`: native plant, room, profile, schedule, pairing and broker screens.
 - `ui/`: shared Figma-based components, background artwork and starter catalog.
 - `data/`: local AppStore, immutable models and Android-free domain logic.
-- `iot/`: real GATT transport, protocol validation, stream framing and command acknowledgement policy.
+- `iot/`: GATT transport, TLS MQTT transport, protocol validation, stream framing and command acknowledgement policy.
+- `firmware/tunas_pot/`: optional ESP32 reference sketch for the MQTT topics.
+
+## Remote MQTT
+
+BLE still pairs a pot that is next to the phone. MQTT is how the same pot is reached from another network.
+
+1. Create a free cluster in the [HiveMQ Cloud console](https://console.hivemq.cloud/). The cluster overview shows a hostname and TLS port **8883**. Under Access Management, add a username and password. Do not put a pump on the public unauthenticated broker; anyone can subscribe to it.
+2. Flash `firmware/tunas_pot/` after filling in `secrets.example.h` (Wi-Fi, broker host, username, password, device ID). The sketch publishes `tunas/<deviceId>/telemetry`, subscribes to `tunas/<deviceId>/cmd`, answers on `ack`, and sets a retained last will on `status`. Relays turn off after the commanded seconds, at 30 seconds, or when MQTT drops.
+3. In the app, open Maintenance → Pair Sensor, enter the same broker host, port 8883, username, password and device ID, then **Connect over MQTT**. Assign the pot to a room. The header shows **MQTT** when the pot is present, **BLE** for a nearby radio, and **Offline** otherwise.
+4. Water, nutrients and the moisture target still ask for confirmation, still require a reading from the last 30 seconds, and still wait for the pot's ack. A broker login while the pot is offline does not report success.
+
+Broker settings are encrypted on the phone. The app has no built-in host or password.
 
 ## Build
 
@@ -58,7 +71,7 @@ Output: `app/build/outputs/apk/debug/app-debug.apk`. A copy is packaged as `dist
 
 ## Verification
 
-The final baseline run passed **50 JVM tests** and **10 Android instrumentation tests** on an isolated Android 15/API 35 AOSP emulator. Eight instrumentation tests exercise the actual UI flows. Lint has no errors; non-blocking warnings remain for localization, starter resources, custom-view draw allocations and tooling/version recommendations. See `dist/verification.json` for exact counts and the APK hash.
+`:app:testDebugUnitTest` passes **68** JVM tests, including MQTT topics, TLS broker settings, the shared actuator gate, and the scripted MQTT session. An earlier baseline also passed **10** Android instrumentation tests on an isolated Android 15/API 35 AOSP emulator; eight of those exercise UI flows. This MQTT change keeps the offline strings those tests look for (`No sensor connected`, `0 Sensors Online`, `Pair Sensor`, `Scan nearby devices`). Instrumentation was not re-run for this change. Lint previously had no errors; non-blocking warnings remain for localization, starter resources, custom-view draw allocations and tooling/version recommendations. See `dist/verification.json` for the earlier instrumentation counts and APK hash.
 
 Additional checks: local storage read after force-stop/new process; navigation and onboarding at approximately 325dp width with 140% system font scale. Physical sensor behavior, cloud auth, a full TalkBack/keyboard accessibility audit and release signing remain unverified/not supplied.
 

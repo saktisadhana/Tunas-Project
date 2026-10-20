@@ -24,15 +24,11 @@ import android.os.Looper;
 import android.os.SystemClock;
 
 import org.json.JSONException;
-import org.json.JSONObject;
-import org.json.JSONTokener;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -59,9 +55,6 @@ public final class BleDeviceClient implements AutoCloseable {
     private static final UUID CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
     private static final long SCAN_MILLIS = 12_000;
     private static final long SETUP_MILLIS = 20_000;
-    private static final String[] FRAME_KEYS = {"type", "id", "ok", "health", "moisture",
-            "nutrient", "sunlight", "temperature", "humidity"};
-
     private final Context context;
     private final Listener listener;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -343,16 +336,7 @@ public final class BleDeviceClient implements AutoCloseable {
         if (!connected || closed) return;
         IncomingMessage message;
         try {
-            JSONTokener tokener = new JSONTokener(line);
-            Object value = tokener.nextValue();
-            if (!(value instanceof JSONObject) || tokener.nextClean() != 0) throw new JSONException("Expected one object");
-            JSONObject object = (JSONObject) value;
-            Map<String, Object> fields = new HashMap<>();
-            for (String key : FRAME_KEYS) {
-                Object field = object.opt(key);
-                fields.put(key, field == JSONObject.NULL ? null : field);
-            }
-            message = IncomingMessage.decode(fields, System.currentTimeMillis());
+            message = IncomingMessage.decode(FlatJson.fields(line, FlatJson.KEYS), System.currentTimeMillis());
         } catch (JSONException | IllegalArgumentException invalid) {
             listener.onStatus("Discarded malformed BLE protocol frame");
             return;
@@ -388,13 +372,8 @@ public final class BleDeviceClient implements AutoCloseable {
             return;
         }
         try {
-            JSONObject object = new JSONObject();
-            object.put("type", "command");
-            object.put("id", id);
-            object.put("action", action);
-            object.put("value", value);
-            outgoing = (object.toString() + "\n").getBytes(StandardCharsets.UTF_8);
-        } catch (JSONException encodingFailure) {
+            outgoing = (CommandJson.encode(id, action, value) + "\n").getBytes(StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException encodingFailure) {
             finishCommand(commands.cancel("Could not encode command; command not sent"));
             return;
         }
