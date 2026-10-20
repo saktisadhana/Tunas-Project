@@ -39,6 +39,8 @@ public class MainActivity extends androidx.appcompat.app.AppCompatActivity {
     GardenPages pages;
     private LinearLayout navigation;
     com.example.tunas.iot.BleDeviceClient device;
+    com.example.tunas.iot.MqttDeviceClient mqtt;
+    com.example.tunas.iot.MqttSettingsStore mqttSettings;
     com.example.tunas.iot.Telemetry telemetry;
     long receivedAt;
     String connectionStatus = "No sensor connected";
@@ -58,10 +60,28 @@ public class MainActivity extends androidx.appcompat.app.AppCompatActivity {
             public void onStatus(String message) { connectionStatus = message; pages.connectionChanged(); refreshReadings(); }
             public void onDeviceFound(String address, String name, int rssi) { pages.deviceFound(address, name, rssi); }
             public void onConnected(boolean connected) {
-                if (!connected) telemetry = null;
+                if (!connected && !mqttOnline()) telemetry = null;
                 pages.connectionChanged(); refreshReadings();
             }
             public void onTelemetry(com.example.tunas.iot.Telemetry value) {
+                if (mqttOnline()) return;
+                telemetry = value; receivedAt = android.os.SystemClock.elapsedRealtime(); refreshReadings();
+            }
+            public void onCommandResult(boolean success, String message) { pages.commandResult(success, message); }
+        });
+        try {
+            mqttSettings = new com.example.tunas.iot.MqttSettingsStore(this);
+        } catch (IllegalStateException unavailable) {
+            mqttSettings = null;
+        }
+        mqtt = new com.example.tunas.iot.MqttDeviceClient(this, new com.example.tunas.iot.MqttDeviceClient.Listener() {
+            public void onStatus(String message) { connectionStatus = message; pages.connectionChanged(); refreshReadings(); }
+            public void onConnected(boolean connected) {
+                if (!connected && !bleOnline()) telemetry = null;
+                pages.connectionChanged(); refreshReadings();
+            }
+            public void onTelemetry(com.example.tunas.iot.Telemetry value) {
+                if (!mqttOnline()) return;
                 telemetry = value; receivedAt = android.os.SystemClock.elapsedRealtime(); refreshReadings();
             }
             public void onCommandResult(boolean success, String message) { pages.commandResult(success, message); }
@@ -285,7 +305,27 @@ public class MainActivity extends androidx.appcompat.app.AppCompatActivity {
         }
         return nav;
     }
-    boolean fresh() { return device != null && device.isConnected() && telemetry != null && android.os.SystemClock.elapsedRealtime() - receivedAt < 30000; }
+    boolean bleOnline() { return device != null && device.isConnected(); }
+    boolean mqttOnline() { return mqtt != null && mqtt.isConnected(); }
+    boolean linkUp() { return mqttOnline() || bleOnline(); }
+    String linkLabel() { return mqttOnline() ? "MQTT" : bleOnline() ? "BLE" : "Offline"; }
+    long readingAge() { return telemetry == null ? Long.MAX_VALUE : android.os.SystemClock.elapsedRealtime() - receivedAt; }
+    boolean fresh() {
+        return com.example.tunas.iot.ActuatorGuard.assess(true, linkUp(), telemetry != null, readingAge(), false)
+                == com.example.tunas.iot.ActuatorGuard.Block.NONE;
+    }
+    void sendDeviceCommand(String action, int value) {
+        if (mqttOnline()) mqtt.command(action, value);
+        else if (device != null) device.command(action, value);
+    }
+    void connectBle(String address) {
+        if (mqtt != null) mqtt.disconnect();
+        device.connect(address);
+    }
+    void connectMqtt(com.example.tunas.iot.MqttBrokerConfig config) {
+        if (device != null) device.disconnect();
+        if (mqtt != null) mqtt.connect(config);
+    }
     private void refreshReadings() {
         if (screen.equals("home") && metricStatus != null) {
             Double[] values = fresh() ? new Double[]{telemetry.health, telemetry.moisture, telemetry.nutrient, telemetry.sunlight, telemetry.temperature, telemetry.humidity} : new Double[6];
@@ -293,8 +333,10 @@ public class MainActivity extends androidx.appcompat.app.AppCompatActivity {
                 metrics[i].setText(values[i] == null ? "--" : String.format(java.util.Locale.getDefault(), "%.0f%s", values[i], i == 4 ? "°C" : i == 2 ? "" : "%"));
                 metrics[i].setTextSize(i == 2 && values[i] != null && values[i] >= 1000 ? 23 : 30);
             }
-            metricStatus.setText(device.isConnected() ? (fresh() ? "Sensor connected" : "Waiting for readings") : "No sensor connected");
-            metricStatus.setContentDescription(metricStatus.getText() + ". " + (device.isConnected() ? pages.roomName(linkedRoom) + ". Nutrient is measured in microsiemens per centimeter. " : "") + "Manage sensors from Maintenance.");
+            metricStatus.setText(linkUp() ? linkLabel() : "No sensor connected");
+            metricStatus.setContentDescription(metricStatus.getText() + ". " + (linkUp()
+                    ? linkLabel() + ". " + pages.roomName(linkedRoom) + (fresh() ? ". " : ". Waiting for readings. ") + "Nutrient is measured in microsiemens per centimeter. "
+                    : "Offline. ") + "Manage sensors from Maintenance.");
         }
         if (pages != null) pages.refreshReadings();
     }
@@ -324,8 +366,17 @@ public class MainActivity extends androidx.appcompat.app.AppCompatActivity {
     }
     @Override protected void onResume() { super.onResume(); clock.post(freshness); }
     @Override protected void onPause() { clock.removeCallbacks(freshness); super.onPause(); }
-    @Override protected void onStop() { super.onStop(); if (device != null) device.disconnect(); }
-    @Override protected void onDestroy() { clock.removeCallbacksAndMessages(null); if (device != null) device.close(); super.onDestroy(); }
+    @Override protected void onStop() {
+        super.onStop();
+        if (device != null) device.disconnect();
+        if (mqtt != null) mqtt.disconnect();
+    }
+    @Override protected void onDestroy() {
+        clock.removeCallbacksAndMessages(null);
+        if (device != null) device.close();
+        if (mqtt != null) mqtt.close();
+        super.onDestroy();
+    }
 
 
 }
