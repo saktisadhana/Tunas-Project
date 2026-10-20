@@ -44,5 +44,25 @@ public class TelemetryTest {
         assertEquals(42.5, t.moisture, 0.0);
         assertEquals(24.0, t.temperature, 0.0);
         assertEquals(1234L, t.timestampMillis);
+        assertNull(t.ph);
+        assertNull(t.tds);
+        assertNull(t.nitrogen);
+        assertNull(t.phosphorus);
+        assertNull(t.potassium);
+    }
+
+    @Test public void optionalPotSensorsStayNullUnlessPresentAndInRange() {
+        Telemetry t = new Telemetry(null, null, null, null, null, null, 6.5, 400.0, 10.0, 20.0, 30.0, 5);
+        assertEquals(6.5, t.ph, 0.0);
+        assertEquals(400.0, t.tds, 0.0);
+        assertEquals(10.0, t.nitrogen, 0.0);
+        assertEquals(20.0, t.phosphorus, 0.0);
+        assertEquals(30.0, t.potassium, 0.0);
+        assertThrows(IllegalArgumentException.class,
+                () -> new Telemetry(null, null, null, null, null, null, 14.1, null, null, null, null, 0));
+        assertThrows(IllegalArgumentException.class,
+                () -> new Telemetry(null, null, null, null, null, null, null, 10000.1, null, null, null, 0));
+        assertThrows(IllegalArgumentException.class,
+                () -> new Telemetry(null, null, null, null, null, null, null, null, 2000.1, null, null, 0));
     }
 }
