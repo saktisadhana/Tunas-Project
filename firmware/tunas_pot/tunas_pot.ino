@@ -2,7 +2,7 @@
 // Analog values are stand-ins until real sensor libs are wired.
 // Pumps stop at the commanded time, at 30s, or if MQTT drops.
 // target_moisture is stored and does not start a relay.
-// Libs: ESP32 WiFiClientSecure, PubSubClient. Put credentials in secrets.example.h.
+// Libs: ESP32 WiFiClientSecure, PubSubClient. Credentials live in secrets.h.
 
 #include <stdlib.h>
 #include <string.h>
@@ -10,8 +10,13 @@
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 
-#include "secrets.example.h"
+#include "root_ca.h"
 #include "isrg_root_x1.h"
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+#error "Copy secrets.example.h to secrets.h in this folder and fill in Wi-Fi, broker host, username, password, and device ID. secrets.h is gitignored."
+#endif
 
 static const int PIN_MOISTURE = 34;
 static const int PIN_TDS = 35;
@@ -81,7 +86,8 @@ Pump waterPump = {PIN_WATER, false, 0, 0};
 Pump nutrientPump = {PIN_NUTRIENT, false, 0, 0};
 
 static bool configured() {
-  return WIFI_SSID[0] != '\0' && MQTT_HOST[0] != '\0' && DEVICE_ID[0] != '\0' && MQTT_PORT > 0;
+  return WIFI_SSID[0] != '\0' && MQTT_HOST[0] != '\0' && DEVICE_ID[0] != '\0' && MQTT_PORT > 0
+      && MQTT_CA_CERT != nullptr && MQTT_CA_CERT[0] != '\0';
 }
 
 static bool deviceIdOk() {
@@ -210,7 +216,7 @@ static void connectMqtt() {
   unsigned long now = millis();
   if (now - lastMqttAttempt < 5000UL) return;
   lastMqttAttempt = now;
-  wifiClient.setCACert(ISRG_ROOT_X1);
+  wifiClient.setCACert(MQTT_CA_CERT);
   mqttClient.setServer(MQTT_HOST, MQTT_PORT);
   mqttClient.setCallback(onMessage);
   mqttClient.setBufferSize(512);
@@ -255,7 +261,7 @@ void setup() {
   waterPump.begin();
   nutrientPump.begin();
   if (!configured() || !deviceIdOk()) {
-    Serial.println("Fill in secrets.example.h before connecting. Relays stay off.");
+    Serial.println("Fill in secrets.h before connecting. Relays stay off.");
     return;
   }
   snprintf(telemetryTopic, sizeof(telemetryTopic), "tunas/%s/telemetry", DEVICE_ID);

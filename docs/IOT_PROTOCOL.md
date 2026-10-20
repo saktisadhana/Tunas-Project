@@ -174,11 +174,11 @@ The phone publishes, for example:
 
 Allowed actions are still only `water` and `nutrition` (1–30 seconds) and `target_moisture` (0–100). The pot answers on `ack` with the same id. The phone holds an ack that arrives before the publish completes, times out after 10 seconds on the monotonic clock, and then drops the MQTT session. Timeout and disconnect mean outcome unknown. Do not retry automatically.
 
-The phone always connects with an `ssl://` URI (HiveMQ Cloud uses port **8883**). Port 1883 is not a cleartext option; the client does not open `tcp://`. Hostname verification uses the platform default verifier and the system trust store. Automatic MQTT reconnect is off, and the session is clean, so subscriptions are not resumed with queued commands.
+The phone always connects with an `ssl://` URI (EMQX Cloud Serverless and HiveMQ Cloud use port **8883**). Port 1883 is not a cleartext option; the client does not open `tcp://`. Hostname verification uses the platform default verifier and the system trust store. Automatic MQTT reconnect is off, and the session is clean, so subscriptions are not resumed with queued commands.
 
 ### Reference sketch
 
-`firmware/tunas_pot/` is an ESP32 Arduino sketch (WiFiClientSecure + PubSubClient) that publishes these topics, applies a 30-second pump cap, stops relays when MQTT drops, and deduplicates the last command id. It stores a moisture target and does **not** run a pump on its own when the target changes. NPK/TDS/pH/moisture reads are uncalibrated analog placeholders, not a claim of sensor-library compatibility. Copy `secrets.example.h` values locally; do not commit Wi-Fi or broker passwords.
+`firmware/tunas_pot/` is an ESP32 Arduino sketch (WiFiClientSecure + PubSubClient) that publishes these topics, applies a 30-second pump cap, stops relays when MQTT drops, and deduplicates the last command id. It stores a moisture target and does **not** run a pump on its own when the target changes. NPK/TDS/pH/moisture reads are uncalibrated analog placeholders, not a claim of sensor-library compatibility. Copy `secrets.example.h` to `secrets.h` (gitignored) and fill in Wi-Fi, host, port 8883, username, password, and device ID. The device ID must match the one entered in the app. `MQTT_CA_CERT` defaults to DigiCert Global Root CA for EMQX Cloud Serverless (`root_ca.h`). HiveMQ Cloud needs `ISRG_ROOT_X1` instead. Do not commit Wi-Fi or broker passwords. Setup steps are in `firmware/tunas_pot/README.md`.
 
 ## Security and commissioning
 

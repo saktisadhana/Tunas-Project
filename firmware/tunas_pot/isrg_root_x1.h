@@ -1,7 +1,7 @@
 #pragma once
 
 // ISRG Root X1 (Let's Encrypt). Public CA, not a secret.
-// HiveMQ Cloud chains to this.
+// HiveMQ Cloud chains to this. Set MQTT_CA_CERT to ISRG_ROOT_X1 to use it.
 static const char ISRG_ROOT_X1[] =
     "-----BEGIN CERTIFICATE-----\n"
     "MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw\n"
