@@ -13,6 +13,7 @@ import android.widget.*;
 import com.example.tunas.data.AppStore;
 import com.example.tunas.iot.ActuatorGuard;
 import com.example.tunas.iot.MqttBrokerConfig;
+import com.example.tunas.iot.MqttPairStatus;
 import com.example.tunas.ui.PlantCatalog;
 import com.example.tunas.ui.TunasUi;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
@@ -27,7 +28,7 @@ final class GardenPages {
     private boolean myPlants;
     private String query = "";
     private int lightFilter, waterFilter;
-    private TextView pairStatus, commandStatus, moistureValue, nutrientValue, liveStatus, maintenanceLink, extraReadings;
+    private TextView pairStatus, commandStatus, moistureValue, nutrientValue, liveStatus, maintenanceLink, extraReadings, mqttFormStatus;
     private LinearLayout deviceResults, pairBody;
     private Boolean pairBuiltOnline;
     private String livePrefix = "";
@@ -447,9 +448,13 @@ final class GardenPages {
         if (!host.screen.equals("pair") || pairBody == null || pairStatus == null) return;
         pairStatus.setText(pairStatusText());
         boolean online = host.linkUp();
-        if (pairBuiltOnline != null && pairBuiltOnline == online && pairBody.getChildCount() > 0) return;
+        if (pairBuiltOnline != null && pairBuiltOnline == online && pairBody.getChildCount() > 0) {
+            showMqttFormStatus();
+            return;
+        }
         pairBuiltOnline = online;
         pairBody.removeAllViews();
+        mqttFormStatus = null;
         if (host.mqttOnline()) buildAssignedLink("MQTT", "Connected over MQTT. Readings show up on Home after the pot sends a report.", () -> host.mqtt.disconnect());
         else if (host.bleOnline()) buildAssignedLink("BLE", "Connected over Bluetooth. Readings show up on Home after the sensor sends its first report.", () -> host.device.disconnect());
         else buildOfflinePairing();
@@ -510,6 +515,11 @@ final class GardenPages {
         host.field(pairBody, "Device ID", deviceId);
         if (host.mqttSettings == null) ui.add(pairBody, ui.caption("Secure storage isn't available, so the broker password can't be saved."));
         TextView feedback = error(pairBody);
+        mqttFormStatus = ui.text("", 16, true);
+        mqttFormStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        ui.add(pairBody, mqttFormStatus);
+        ui.gap(pairBody, 8);
+        showMqttFormStatus();
         ui.add(pairBody, ui.button("Connect over MQTT", true, () -> connectMqtt(saved, hostName, port, username, password, deviceId, feedback)));
         if (saved != null) {
             ui.gap(pairBody, 12);
@@ -521,6 +531,28 @@ final class GardenPages {
                 } catch (IllegalStateException e) { feedback.setText(e.getMessage()); }
             }));
         }
+    }
+    private void showMqttFormStatus() {
+        if (mqttFormStatus == null) return;
+        String line = MqttPairStatus.line(host.connectionStatus, savedDeviceId());
+        mqttFormStatus.setText(line);
+        mqttFormStatus.setVisibility(line.isEmpty() ? View.GONE : View.VISIBLE);
+        boolean failure = line.startsWith("Could not") || line.startsWith("The pot is offline")
+                || line.startsWith("Broker disconnected") || line.startsWith("MQTT publish")
+                || line.startsWith("Command acknowledgement") || line.startsWith("Discarded")
+                || line.startsWith("Disconnected.");
+        mqttFormStatus.setTextColor(failure ? ui.error : ui.forest);
+        if (line.isEmpty()) return;
+        mqttFormStatus.post(() -> {
+            if (mqttFormStatus == null || mqttFormStatus.getVisibility() != View.VISIBLE) return;
+            android.graphics.Rect area = new android.graphics.Rect(0, 0, Math.max(mqttFormStatus.getWidth(), 1), mqttFormStatus.getHeight() + ui.dp(72));
+            mqttFormStatus.requestRectangleOnScreen(area, false);
+        });
+    }
+    private String savedDeviceId() {
+        if (host.mqttSettings == null) return "";
+        MqttBrokerConfig saved = host.mqttSettings.load();
+        return saved == null ? "" : saved.deviceId;
     }
     private void connectMqtt(MqttBrokerConfig saved, EditText hostName, EditText port, EditText username, EditText password, EditText deviceId, TextView feedback) {
         String typedPassword = password.getText().toString();
