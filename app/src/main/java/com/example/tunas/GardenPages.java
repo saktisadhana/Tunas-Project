@@ -11,13 +11,16 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.*;
 import com.example.tunas.data.AppStore;
+import com.example.tunas.iot.ActuatorGuard;
+import com.example.tunas.iot.MqttBrokerConfig;
+import com.example.tunas.iot.MqttPairStatus;
 import com.example.tunas.ui.PlantCatalog;
 import com.example.tunas.ui.TunasUi;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import java.text.DateFormat;
 import java.util.*;
 
-/** Native screens sharing the authored Figma system; all mutations go through AppStore or BLE. */
+/** Native screens for the Figma layout. Plants are local; sensors are BLE or MQTT. */
 final class GardenPages {
     private final MainActivity host;
     private final TunasUi ui;
@@ -25,8 +28,11 @@ final class GardenPages {
     private boolean myPlants;
     private String query = "";
     private int lightFilter, waterFilter;
-    private TextView pairStatus, commandStatus, moistureValue, nutrientValue, liveStatus;
+    private TextView pairStatus, commandStatus, moistureValue, nutrientValue, liveStatus, maintenanceLink, extraReadings, mqttFormStatus;
     private LinearLayout deviceResults, pairBody;
+    private Boolean pairBuiltOnline;
+    private String pairBuiltKey;
+    private String livePrefix = "";
     private final Map<String, String> found = new LinkedHashMap<>();
     private final Map<String, String> roomStates = new HashMap<>();
     private final Set<String> collapsed = new HashSet<>();
@@ -281,14 +287,21 @@ final class GardenPages {
 
     void maintenance() {
         LinearLayout column = host.page("maintenance");
+        moistureValue = nutrientValue = liveStatus = commandStatus = maintenanceLink = extraReadings = null;
         LinearLayout status = ui.row(); status.setPadding(ui.dp(18), ui.dp(12), ui.dp(12), ui.dp(12)); ui.card(status, 10, 5);
-        TextView online = ui.lifted(ui.text(host.device.isConnected() ? "1 Sensor Online" : "0 Sensors Online", 20, true));
+        TextView online = ui.lifted(ui.text(host.linkUp() ? "1 Sensor Online" : "0 Sensors Online", 20, true));
         status.addView(online, new LinearLayout.LayoutParams(0, -2, 1));
-        Button pair = ui.button(host.device.isConnected() ? "Manage sensor" : "Pair Sensor", false, this::pair); pair.setTextSize(14);
+        maintenanceLink = ui.text(host.linkLabel(), 13, true);
+        maintenanceLink.setPadding(ui.dp(10), ui.dp(6), ui.dp(10), ui.dp(6));
+        maintenanceLink.setBackground(ui.shape(0x59A2B595, 40));
+        maintenanceLink.setContentDescription("Connection " + host.linkLabel());
+        LinearLayout.LayoutParams linkParams = new LinearLayout.LayoutParams(-2, -2);
+        linkParams.rightMargin = ui.dp(8);
+        status.addView(maintenanceLink, linkParams);
+        Button pair = ui.button(host.linkUp() ? "Manage sensor" : "Pair Sensor", false, this::pair); pair.setTextSize(14);
         ui.clickable(pair, ui.sage, 26, this::pair); pair.setTextColor(ui.olive); pair.setElevation(ui.dp(3));
         pair.setMinWidth(0); pair.setMinimumWidth(0); pair.setPadding(ui.dp(16), 0, ui.dp(16), 0);
         status.addView(pair, new LinearLayout.LayoutParams(-2, ui.dp(48))); ui.add(column, status); ui.gap(column, 22);
-        moistureValue = nutrientValue = liveStatus = commandStatus = null;
         if (store.rooms().isEmpty()) {
             LinearLayout empty = panel(column, 20); TextView none = ui.text("No rooms yet", 22, true); ui.lead(none, R.drawable.figma_home, ui.forest, 22); ui.add(empty, none); ui.gap(empty, 12);
             ui.add(empty, ui.text("Add the room your plants are in. Then pair a sensor to see its readings here.", 17, false));
@@ -303,7 +316,8 @@ final class GardenPages {
             LinearLayout identity = ui.column(); identity.setPadding(ui.dp(12), 0, 0, 0);
             ui.add(identity, ui.text(room.name, 17, true)); ui.gap(identity, 3);
             int count = 0; for (AppStore.Plant p : store.plants()) if (p.roomId.equals(room.id)) count++;
-            TextView roomStatus = ui.caption(count + (count == 1 ? " plant" : " plants") + ", " + (linked ? "sensor assigned" : "no sensor"));
+            String presence = linked ? host.linkLabel() : "no sensor";
+            TextView roomStatus = ui.caption(count + (count == 1 ? " plant" : " plants") + ", " + presence);
             ui.add(identity, roomStatus); header.addView(identity, new LinearLayout.LayoutParams(0, -2, 1));
             ImageView expand = ui.iconButton(collapsed.contains(room.id) ? android.R.drawable.arrow_down_float : android.R.drawable.arrow_up_float,
                 "Expand or collapse " + room.name, () -> { if (!collapsed.remove(room.id)) collapsed.add(room.id); maintenance(); });
@@ -347,12 +361,18 @@ final class GardenPages {
                 nutrientRow.addView(nutrientLabel, new LinearLayout.LayoutParams(0, -2, 1));
                 TextView nutrient = ui.text("-- µS/cm", 14, true); nutrient.setBackground(ui.shape(0x59A2B595, 20)); nutrient.setPadding(ui.dp(12), ui.dp(6), ui.dp(12), ui.dp(6));
                 nutrientRow.addView(nutrient); ui.add(card, nutrientRow); if (linked) nutrientValue = nutrient;
+                if (linked) {
+                    extraReadings = ui.caption("");
+                    extraReadings.setVisibility(View.GONE);
+                    ui.gap(card, 8); ui.add(card, extraReadings);
+                }
                 ui.gap(card, 18); LinearLayout actions = ui.row();
                 Button water = ui.button("Start Watering", true, () -> send(room.id, "water", 5)); water.setTextSize(14); ui.lead(water, R.drawable.figma_moisture, ui.cream, 16);
                 Button nutrition = ui.button("Start Nutrition", false, () -> send(room.id, "nutrition", 5)); nutrition.setTextSize(14); ui.lead(nutrition, R.drawable.figma_nutrient, ui.olive, 16);
                 water.setPadding(ui.dp(10), ui.dp(12), ui.dp(10), ui.dp(12)); nutrition.setPadding(ui.dp(10), ui.dp(12), ui.dp(10), ui.dp(12));
                 weight(actions, water, true); weight(actions, nutrition, false); ui.add(card, actions);
                 if (linked) {
+                    livePrefix = count + (count == 1 ? " plant" : " plants") + ", ";
                     liveStatus = roomStatus;
                     commandStatus = ui.caption(roomStates.getOrDefault(room.id, "Tunas asks before it runs the pump."));
                     commandStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE); ui.gap(card, 12); ui.add(card, commandStatus);
@@ -362,18 +382,22 @@ final class GardenPages {
         }
         ui.add(column, ui.button("Add Room", false, () -> roomForm(this::maintenance))); refreshReadings();
     }
+    private ActuatorGuard.Block guard(String room) {
+        return ActuatorGuard.assess(room.equals(host.linkedRoom), host.linkUp(), host.telemetry != null, host.readingAge(), commandPending);
+    }
     private void send(String room, String action, int value) {
-        if (!room.equals(host.linkedRoom) || !host.device.isConnected()) { message("No sensor connected", "Pair a sensor and assign it to this room first. Tunas didn't send anything."); return; }
-        if (!host.fresh()) { message("No recent readings", "The sensor hasn't reported in the last 30 seconds. Tunas didn't send anything."); return; }
-        if (commandPending) { message("Still waiting", "The sensor hasn't confirmed your last command. Try again once it does."); return; }
+        ActuatorGuard.Block block = guard(room);
+        if (block == ActuatorGuard.Block.OFFLINE) { message("No sensor connected", "Pair a sensor and assign it to this room first. Tunas didn't send anything."); return; }
+        if (block == ActuatorGuard.Block.STALE) { message("No recent readings", "The sensor hasn't reported in the last 30 seconds. Tunas didn't send anything."); return; }
+        if (block == ActuatorGuard.Block.BUSY) { message("Still waiting", "The sensor hasn't confirmed your last command. Try again once it does."); return; }
         boolean target = action.equals("target_moisture");
         boolean pump = action.equals("water");
         new MaterialAlertDialogBuilder(host).setTitle(target ? "Set moisture target to " + value + "%?" : pump ? "Water for 5 seconds?" : "Add nutrients for 5 seconds?")
             .setMessage((target ? "The sensor's firmware may water the plant to reach this level. " : "The pump runs for 5 seconds. Check the tubing and the reservoir first. ")
                 + "Use this only with a sensor running the Tunas firmware. Tunas can't check that your pump is set up safely.")
             .setNegativeButton("Cancel", null).setPositiveButton(target ? "Set target" : pump ? "Water now" : "Add nutrients", (d, w) -> {
-                if (!host.fresh() || !room.equals(host.linkedRoom)) { message("Sensor disconnected", "Tunas didn't send anything. Check the sensor and try again."); return; }
-                commandPending = true; if (commandStatus != null) commandStatus.setText("Waiting for the sensor to confirm"); host.device.command(action, value);
+                if (guard(room) != ActuatorGuard.Block.NONE) { message("Sensor disconnected", "Tunas didn't send anything. Check the sensor and try again."); return; }
+                commandPending = true; if (commandStatus != null) commandStatus.setText("Waiting for the sensor to confirm"); host.sendDeviceCommand(action, value);
             }).show();
     }
     void refreshReadings() {
@@ -381,7 +405,31 @@ final class GardenPages {
         boolean fresh = host.fresh();
         if (moistureValue != null) moistureValue.setText(fresh && host.telemetry.moisture != null ? String.format(Locale.getDefault(), "%.0f%%", host.telemetry.moisture) : "--");
         if (nutrientValue != null) nutrientValue.setText((fresh && host.telemetry.nutrient != null ? String.format(Locale.getDefault(), "%.0f", host.telemetry.nutrient) : "--") + " µS/cm");
-        if (liveStatus != null) liveStatus.setText(host.device.isConnected() ? fresh ? "Sensor connected" : "Sensor connected, waiting for readings" : "Sensor offline");
+        if (liveStatus != null) liveStatus.setText(livePrefix + host.linkLabel());
+        if (maintenanceLink != null) {
+            maintenanceLink.setText(host.linkLabel());
+            maintenanceLink.setContentDescription("Connection " + host.linkLabel());
+        }
+        if (extraReadings != null) {
+            String extras = fresh ? sensorExtras(host.telemetry) : "";
+            extraReadings.setText(extras);
+            extraReadings.setVisibility(extras.isEmpty() ? View.GONE : View.VISIBLE);
+        }
+    }
+    private String sensorExtras(com.example.tunas.iot.Telemetry reading) {
+        if (reading == null) return "";
+        StringBuilder text = new StringBuilder();
+        appendReading(text, "pH", reading.ph, 1);
+        appendReading(text, "TDS", reading.tds, 0);
+        appendReading(text, "N", reading.nitrogen, 0);
+        appendReading(text, "P", reading.phosphorus, 0);
+        appendReading(text, "K", reading.potassium, 0);
+        return text.toString();
+    }
+    private void appendReading(StringBuilder text, String label, Double value, int decimals) {
+        if (value == null) return;
+        if (text.length() > 0) text.append(" · ");
+        text.append(label).append(' ').append(String.format(Locale.getDefault(), decimals == 1 ? "%.1f" : "%.0f", value));
     }
     void commandResult(boolean success, String message) {
         commandPending = false; String display = (success ? "Sensor confirmed: " : "Sensor didn't confirm: ") + message;
@@ -392,42 +440,215 @@ final class GardenPages {
 
     void pair() {
         LinearLayout column = host.page("pair"); back(column, this::maintenance); ui.add(column, ui.title("Pair Sensor")); ui.gap(column, 12);
-        ui.add(column, ui.text("Turn on your sensor and keep it close to your phone. Tunas works with sensors running the Tunas firmware.", 17, false)); ui.gap(column, 20);
-        pairStatus = ui.text(host.connectionStatus, 17, true); pairStatus.setBackground(ui.shape(0x59A2B595, 14)); ui.pad(pairStatus, 14); pairStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE); ui.add(column, pairStatus); ui.gap(column, 16);
-        pairBody = ui.column(); ui.add(column, pairBody); deviceResults = ui.column(); ui.add(column, deviceResults);
+        ui.add(column, ui.text("Turn on the node, scan nearby devices and enter its unique sticker code in Android's pairing dialog. Send Wi-Fi and MQTT settings securely over Bluetooth. Bluetooth also works without internet.", 17, false)); ui.gap(column, 20);
+        pairStatus = ui.text(pairStatusText(), 17, true); pairStatus.setBackground(ui.shape(0x59A2B595, 14)); ui.pad(pairStatus, 14); pairStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE); ui.add(column, pairStatus); ui.gap(column, 16);
+        pairBody = ui.column(); ui.add(column, pairBody); deviceResults = null; pairBuiltOnline = null; pairBuiltKey = null;
         connectionChanged();
     }
     void connectionChanged() {
-        if (!host.screen.equals("pair") || pairBody == null) return;
-        pairStatus.setText(host.device.isConnected() ? "Sensor connected" : host.connectionStatus);
+        if (!host.screen.equals("pair") || pairBody == null || pairStatus == null) return;
+        pairStatus.setText(pairStatusText());
+        boolean online = host.linkUp();
+        String key = (host.bleOnline() ? "BLE" : host.mqttOnline() ? "MQTT" : "Offline") + ":"
+                + (host.setupStatus == null ? "" : host.setupStatus.deviceId + ":" + host.setupStatus.setupOpen);
+        if (key.equals(pairBuiltKey) && pairBody.getChildCount() > 0) {
+            showMqttFormStatus();
+            return;
+        }
+        pairBuiltOnline = online;
+        pairBuiltKey = key;
         pairBody.removeAllViews();
-        if (host.device.isConnected()) {
-            ui.add(pairBody, ui.text("Connected. Readings show up on Home after the sensor sends its first report.", 17, false)); ui.gap(pairBody, 18);
-            List<AppStore.Room> rooms = store.rooms(); String[] labels = new String[rooms.size() + 1]; labels[0] = "Unassigned";
-            for (int i = 0; i < rooms.size(); i++) labels[i + 1] = rooms.get(i).name;
-            Spinner room = select("Assign sensor to room", labels);
-            for (int i = 0; i < rooms.size(); i++) if (rooms.get(i).id.equals(host.linkedRoom)) room.setSelection(i + 1);
-            host.field(pairBody, "Assign to room", room);
-            ui.add(pairBody, ui.button("Done", true, () -> { int i = room.getSelectedItemPosition(); host.assignRoom(i == 0 ? "" : rooms.get(i - 1).id); maintenance(); }));
-            ui.gap(pairBody, 12); ui.add(pairBody, ui.button("Disconnect", false, () -> host.device.disconnect())); deviceResults.removeAllViews();
-        } else {
-            ui.add(pairBody, ui.button("Scan nearby devices", true, () -> { found.clear(); renderDevices(); host.requestScan(); }));
-            ui.gap(pairBody, 12); LinearLayout tools = ui.row();
-            weight(tools, ui.button("Stop scan", false, () -> host.device.stopScan()), true);
-            weight(tools, ui.button("Bluetooth settings", false, () -> host.startActivity(new Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS))), false); ui.add(pairBody, tools);
-            ui.gap(pairBody, 16); renderDevices();
+        mqttFormStatus = null;
+        if (host.linkUp()) {
+            buildAssignedLink(host.linkLabel(), "MQTT is preferred when fresh readings arrive. Authenticated Bluetooth remains available nearby, including without Wi-Fi or internet.", host::disconnectLinks);
+            if (host.bleOnline() && host.setupStatus != null) buildNodeSetup();
+        }
+        else buildOfflinePairing();
+    }
+    private String pairStatusText() {
+        if (host.setupStatus != null && host.bleOnline()) return host.linkLabel() + " · " + host.setupStatus.deviceId
+                + "\nSetup: " + host.setupStatus.stage.replace('_', ' ')
+                + (host.setupStatus.mqttReady ? "\nNode MQTT ready" : "\nBluetooth available; MQTT not ready");
+        if (host.mqttOnline()) return "MQTT";
+        if (host.bleOnline()) return "BLE";
+        return host.connectionStatus == null || host.connectionStatus.isEmpty() ? "Offline" : host.connectionStatus;
+    }
+    private void buildAssignedLink(String transport, String detail, Runnable disconnect) {
+        deviceResults = null;
+        ui.add(pairBody, ui.text(transport, 20, true)); ui.gap(pairBody, 8);
+        ui.add(pairBody, ui.text(detail, 17, false)); ui.gap(pairBody, 18);
+        List<AppStore.Room> rooms = store.rooms(); String[] labels = new String[rooms.size() + 1]; labels[0] = "Unassigned";
+        for (int i = 0; i < rooms.size(); i++) labels[i + 1] = rooms.get(i).name;
+        Spinner room = select("Assign sensor to room", labels);
+        for (int i = 0; i < rooms.size(); i++) if (rooms.get(i).id.equals(host.linkedRoom)) room.setSelection(i + 1);
+        host.field(pairBody, "Assign to room", room);
+        ui.add(pairBody, ui.button("Done", true, () -> { int i = room.getSelectedItemPosition(); host.assignRoom(i == 0 ? "" : rooms.get(i - 1).id); maintenance(); }));
+        ui.gap(pairBody, 12); ui.add(pairBody, ui.button("Disconnect", false, disconnect));
+    }
+    private void buildOfflinePairing() {
+        ui.add(pairBody, ui.text("Bluetooth", 20, true)); ui.gap(pairBody, 8);
+        ui.add(pairBody, ui.button("Scan nearby devices", true, () -> { found.clear(); renderDevices(); host.requestScan(); }));
+        ui.gap(pairBody, 12); LinearLayout tools = ui.row();
+        weight(tools, ui.button("Stop scan", false, () -> host.device.stopScan()), true);
+        weight(tools, ui.button("Bluetooth settings", false, () -> host.startActivity(new Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS))), false); ui.add(pairBody, tools);
+        ui.gap(pairBody, 16);
+        deviceResults = ui.column(); ui.add(pairBody, deviceResults); renderDevices();
+        ui.gap(pairBody, 8); ui.divider(pairBody, 8);
+        ui.add(pairBody, ui.text("MQTT", 20, true)); ui.gap(pairBody, 8);
+        ui.add(pairBody, ui.text("Broker settings stay encrypted on this phone. Tunas always uses TLS and never stores a built-in broker.", 16, false)); ui.gap(pairBody, 16);
+        MqttBrokerConfig saved = host.mqttSettings == null ? null : host.mqttSettings.load();
+        EditText hostName = ui.input("Broker host", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        hostName.setContentDescription("Broker host");
+        EditText port = ui.input("8883", InputType.TYPE_CLASS_NUMBER);
+        port.setContentDescription("Broker port");
+        port.setText(saved == null ? "8883" : Integer.toString(saved.port));
+        EditText username = ui.input("Username", InputType.TYPE_CLASS_TEXT);
+        username.setContentDescription("Broker username");
+        EditText password = ui.input("Password", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        password.setContentDescription("Broker password");
+        EditText deviceId = ui.input("Device ID", InputType.TYPE_CLASS_TEXT);
+        deviceId.setContentDescription("Device ID");
+        if (saved != null) {
+            hostName.setText(saved.host);
+            username.setText(saved.username);
+            deviceId.setText(saved.deviceId);
+        }
+        host.field(pairBody, "Broker host", hostName);
+        host.field(pairBody, "Port", port);
+        host.field(pairBody, "Username", username);
+        host.field(pairBody, "Password", password);
+        if (saved != null && !saved.password.isEmpty()) {
+            ui.add(pairBody, ui.caption("A password is already saved on this phone. Leave this blank to keep it."));
+            ui.gap(pairBody, 12);
+        }
+        host.field(pairBody, "Device ID", deviceId);
+        if (host.mqttSettings == null) ui.add(pairBody, ui.caption("Secure storage isn't available, so the broker password can't be saved."));
+        TextView feedback = error(pairBody);
+        mqttFormStatus = ui.text("", 16, true);
+        mqttFormStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        ui.add(pairBody, mqttFormStatus);
+        ui.gap(pairBody, 8);
+        showMqttFormStatus();
+        ui.add(pairBody, ui.button("Connect over MQTT", true, () -> connectMqtt(saved, hostName, port, username, password, deviceId, feedback)));
+        if (saved != null) {
+            ui.gap(pairBody, 12);
+            ui.add(pairBody, ui.button("Forget saved broker", false, () -> {
+                try {
+                    if (host.mqttSettings != null) host.mqttSettings.clear();
+                    if (host.mqtt != null) host.mqtt.disconnect();
+                    pair();
+                } catch (IllegalStateException e) { feedback.setText(e.getMessage()); }
+            }));
+        }
+    }
+
+    private void buildNodeSetup() {
+        ui.divider(pairBody, 16);
+        ui.add(pairBody, ui.text("Node setup", 20, true)); ui.gap(pairBody, 8);
+        if (!host.setupStatus.setupOpen) {
+            ui.add(pairBody, ui.text("Hold the node's Setup button for 5 seconds to change Wi-Fi or MQTT. Pumps stop while setup is open. Existing configuration is kept until its replacement is verified.", 16, false));
+            return;
+        }
+        final String nodeId = host.setupStatus.deviceId;
+        ui.add(pairBody, ui.text("Setup is open for 5 minutes; pump controls are paused until it closes. Use a 2.4 GHz Wi-Fi network. A failed network setup does not disable Bluetooth.", 16, false)); ui.gap(pairBody, 12);
+        ui.add(pairBody, ui.button("Use Bluetooth now / close setup", false, () -> host.device.finishSetup())); ui.gap(pairBody, 12);
+        MqttBrokerConfig saved = host.mqttSettings == null ? null : host.mqttSettings.load();
+        if (saved != null && !saved.deviceId.equals(nodeId)) saved = null;
+        final MqttBrokerConfig existing = saved;
+        EditText ssid = ui.input("Wi-Fi network name", InputType.TYPE_CLASS_TEXT);
+        EditText wifiPassword = ui.input("Wi-Fi password", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        EditText broker = ui.input("Broker host", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        EditText port = ui.input("8883", InputType.TYPE_CLASS_NUMBER); port.setText(saved == null ? "8883" : Integer.toString(saved.port));
+        EditText username = ui.input("Broker username", InputType.TYPE_CLASS_TEXT);
+        EditText password = ui.input("Broker password", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        if (saved != null) { broker.setText(saved.host); username.setText(saved.username); }
+        Spinner ca = select("Broker certificate authority", new String[]{"DigiCert Global Root CA (EMQX)", "ISRG Root X1 (HiveMQ)"});
+        host.field(pairBody, "Wi-Fi SSID", ssid); host.field(pairBody, "Wi-Fi password (blank for open Wi-Fi)", wifiPassword);
+        host.field(pairBody, "Broker host", broker); host.field(pairBody, "TLS port", port);
+        host.field(pairBody, "Broker username", username); host.field(pairBody, "Broker password", password);
+        if (saved != null) ui.add(pairBody, ui.caption("Leave the broker password blank to keep it for the same broker and username."));
+        host.field(pairBody, "Trusted certificate authority", ca);
+        ui.add(pairBody, ui.caption("Verify the broker's actual certificate chain; a provider name alone does not guarantee its CA."));
+        ui.add(pairBody, ui.caption("Device ID: " + nodeId + ". This identity is read from the authenticated node, not entered manually."));
+        TextView feedback = error(pairBody);
+        ui.add(pairBody, ui.button("Send setup over Bluetooth", true, () -> {
+            try {
+                int number = Integer.parseInt(port.getText().toString().trim());
+                MqttBrokerConfig config = MqttBrokerConfig.create(broker.getText().toString(), number, username.getText().toString(), password.getText().toString(), nodeId);
+                if (config.password.isEmpty() && existing != null && config.host.equals(existing.host)
+                        && config.port == existing.port && config.username.equals(existing.username))
+                    config = MqttBrokerConfig.create(config.host, config.port, config.username, existing.password, nodeId);
+                host.provisionNode(new com.example.tunas.iot.ProvisioningConfig(ssid.getText().toString(), wifiPassword.getText().toString(), ca.getSelectedItemPosition() == 0 ? "digicert" : "isrg", config));
+                host.hideKeyboard(); wifiPassword.setText(""); password.setText("");
+                feedback.setText("Configuration sent for testing. Watch the setup status above; no pump command is queued.");
+            } catch (IllegalArgumentException | IllegalStateException failure) { feedback.setText(failure.getMessage()); }
+        }));
+    }
+    private void showMqttFormStatus() {
+        if (mqttFormStatus == null) return;
+        String line = MqttPairStatus.line(host.connectionStatus, savedDeviceId());
+        mqttFormStatus.setText(line);
+        mqttFormStatus.setVisibility(line.isEmpty() ? View.GONE : View.VISIBLE);
+        boolean failure = line.startsWith("Could not") || line.startsWith("The pot is offline")
+                || line.startsWith("Broker disconnected") || line.startsWith("MQTT publish")
+                || line.startsWith("Command acknowledgement") || line.startsWith("Discarded")
+                || line.startsWith("Disconnected.");
+        mqttFormStatus.setTextColor(failure ? ui.error : ui.forest);
+        if (line.isEmpty()) return;
+        mqttFormStatus.post(() -> {
+            if (mqttFormStatus == null || mqttFormStatus.getVisibility() != View.VISIBLE) return;
+            android.graphics.Rect area = new android.graphics.Rect(0, 0, Math.max(mqttFormStatus.getWidth(), 1), mqttFormStatus.getHeight() + ui.dp(72));
+            mqttFormStatus.requestRectangleOnScreen(area, false);
+        });
+    }
+    private String savedDeviceId() {
+        if (host.mqttSettings == null) return "";
+        MqttBrokerConfig saved = host.mqttSettings.load();
+        return saved == null ? "" : saved.deviceId;
+    }
+    private void connectMqtt(MqttBrokerConfig saved, EditText hostName, EditText port, EditText username, EditText password, EditText deviceId, TextView feedback) {
+        String typedPassword = password.getText().toString();
+        String passwordToUse = typedPassword;
+        int portNumber;
+        try {
+            portNumber = Integer.parseInt(port.getText().toString().trim());
+        } catch (NumberFormatException invalid) {
+            feedback.setText("Enter a broker port from 1 to 65535. TLS usually uses 8883.");
+            return;
+        }
+        if (typedPassword.isEmpty() && saved != null && !saved.password.isEmpty()) {
+            try {
+                MqttBrokerConfig typed = MqttBrokerConfig.create(hostName.getText().toString(), portNumber, username.getText().toString(), "", deviceId.getText().toString());
+                if (typed.host.equals(saved.host) && typed.port == saved.port && typed.username.equals(saved.username) && typed.deviceId.equals(saved.deviceId)) {
+                    passwordToUse = saved.password;
+                } else {
+                    feedback.setText("Enter the broker password. A saved password is only reused for the same host, username and device.");
+                    return;
+                }
+            } catch (IllegalArgumentException ignored) {
+                // The create call below reports the field error.
+            }
+        }
+        try {
+            MqttBrokerConfig config = MqttBrokerConfig.create(hostName.getText().toString(), portNumber, username.getText().toString(), passwordToUse, deviceId.getText().toString());
+            if (host.mqttSettings != null) host.mqttSettings.save(config);
+            host.hideKeyboard();
+            feedback.setText("");
+            host.connectMqtt(config);
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            feedback.setText(e.getMessage());
         }
     }
     void deviceFound(String address, String name, int rssi) {
         found.put(address, name + "\n" + address + ", signal " + rssi + " dBm"); if (host.screen.equals("pair")) renderDevices();
     }
     private void renderDevices() {
-        if (deviceResults == null || !host.screen.equals("pair")) return;
+        if (deviceResults == null || !host.screen.equals("pair") || host.linkUp()) return;
         deviceResults.removeAllViews();
         if (found.isEmpty()) ui.add(deviceResults, ui.caption("No sensors found yet. Move closer to the sensor and scan again."));
         for (Map.Entry<String, String> item : found.entrySet()) {
             LinearLayout card = panel(deviceResults, 16); ui.add(card, ui.text(item.getValue(), 16, false)); ui.gap(card, 12);
-            ui.add(card, ui.button("Connect", false, () -> host.device.connect(item.getKey()))); ui.gap(deviceResults, 14);
+            ui.add(card, ui.button("Connect", false, () -> host.connectBle(item.getKey()))); ui.gap(deviceResults, 14);
         }
     }
     void profile() {
@@ -444,14 +665,20 @@ final class GardenPages {
         ui.add(menu, ui.listRow(R.drawable.figma_clock, "Care Schedule", this::tasks)); ui.divider(menu, 0);
         ui.add(menu, ui.listRow(R.drawable.ic_stat_tunas, "Care reminders: " + (store.notificationsEnabled() ? "on" : "off"), host::toggleReminders)); ui.divider(menu, 0);
         ui.add(menu, ui.listRow(R.drawable.figma_wrench, "Pair Sensor", this::pair)); ui.divider(menu, 0);
-        ui.add(menu, ui.listRow(android.R.drawable.ic_lock_lock, "Privacy & data", () -> message("Privacy & data", "Tunas keeps your profile, plants and watering history on this phone. It doesn't back them up, sync them or send analytics. It asks for Bluetooth only when you scan for a sensor. To erase everything, clear the app's storage in Android settings."))); ui.divider(menu, 0);
+        ui.add(menu, ui.listRow(android.R.drawable.ic_lock_lock, "Privacy & data", () -> message("Privacy & data", "Tunas keeps your profile, plants and watering history on this phone. The MQTT broker password is encrypted in app-private storage and is not backed up. Tunas doesn't sync a cloud account or send analytics. It asks for Bluetooth only when you scan for a sensor. To erase everything, clear the app's storage in Android settings."))); ui.divider(menu, 0);
         ui.add(menu, ui.listRow(android.R.drawable.ic_menu_share, "Share App", () -> {
             Intent share = new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, "I'm using Tunas to keep track of watering my plants. It's not on the Play Store yet, so ask me for the APK.");
             host.startActivity(Intent.createChooser(share, "Share Tunas"));
         })); ui.gap(column, 24);
         Runnable logOut = () -> new MaterialAlertDialogBuilder(host).setTitle("Log out of Tunas?")
             .setMessage("Your plants and schedules stay on this phone. Open your profile again to see them.").setNegativeButton("Cancel", null)
-            .setPositiveButton("Log Out", (d, w) -> mutate(() -> { host.device.disconnect(); store.signOut(); CareReminders.sync(host); host.recreate(); })).show();
+            .setPositiveButton("Log Out", (d, w) -> mutate(() -> {
+                host.device.disconnect();
+                if (host.mqtt != null) host.mqtt.disconnect();
+                store.signOut();
+                CareReminders.sync(host);
+                host.recreate();
+            })).show();
         Button logOutButton = ui.button("Log Out", false, logOut); ui.clickable(logOutButton, ui.outlined(ui.cream, 14, ui.error), 14, logOut);
         logOutButton.setTextColor(ui.error); ui.add(column, logOutButton); ui.gap(column, 8);
     }
