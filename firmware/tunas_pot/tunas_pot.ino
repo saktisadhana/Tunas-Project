@@ -1,6 +1,3 @@
-// ESP32 (classic), Arduino-ESP32 2.0.17. See README.md before attaching actuators.
-// BLE Secure Connections + per-node sticker passkey; asynchronous TLS MQTT.
-#include <Arduino.h>
 #include <WiFi.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
@@ -35,6 +32,8 @@ struct Frame { char text[2049]; uint32_t epoch; bool ble; };
 struct Publish { char text[512]; bool telemetry; };
 struct Progress { char stage[24], id[65]; bool ready, closeSetup; };
 QueueHandle_t incoming, outgoing, configurations, progress;
+struct PumpEvent { int pin; bool running, fromBle; uint32_t milliseconds; };
+QueueHandle_t pumpEvents;
 SemaphoreHandle_t pumpLock;
 SemaphoreHandle_t statusLock;
 Preferences prefs;
@@ -47,7 +46,6 @@ volatile bool mqttTransportFailure = false;
 volatile uint32_t bleEpoch = 0, mqttEpoch = 0;
 uint32_t setupStarted, connectedAt, pairingBlockedAt = 0;
 uint8_t pairingFailures = 0;
-uint32_t passkey;
 uint16_t bleConnectionId;
 String deviceId, stage = "setup", resultId;
 String statusSnapshot;
@@ -62,10 +60,19 @@ std::string bleBuffer;
 struct Pump {
   int pin; bool running; bool fromBle; uint32_t startedAt, duration, linkEpoch;
   void begin() { pinMode(pin, OUTPUT); digitalWrite(pin, RELAY_OFF); running = false; }
-  void stop() { digitalWrite(pin, RELAY_OFF); running = false; }
+  void stop() {
+    digitalWrite(pin, RELAY_OFF);
+    if (!running) return;
+    running = false;
+    PumpEvent event = {pin, false, fromBle, millis() - startedAt};
+    xQueueSend(pumpEvents, &event, 0);
+  }
   void start(uint32_t seconds, bool source) {
     fromBle = source; linkEpoch = source ? bleEpoch : mqttEpoch; startedAt = millis(); duration = seconds * 1000;
     running = true; digitalWrite(pin, RELAY_ON);
+    PumpEvent event = {pin, true, fromBle, duration};
+    // shortcut: logs may drop if full; enlarge the queue if diagnostics need every transition.
+    xQueueSend(pumpEvents, &event, 0); // Never block the pump safety task on serial output.
   }
   void poll(uint32_t now) {
     bool link = fromBle ? bleAuthenticated && linkEpoch == bleEpoch
@@ -128,23 +135,19 @@ static bool bonded(const uint8_t* address) {
 }
 class Security : public BLESecurityCallbacks {
   uint32_t onPassKeyRequest() override {
-    if (!setupOpen || (pairingFailures >= 5 && millis() - pairingBlockedAt < 60000)) { bleServer->disconnect(bleConnectionId); return 0; }
-    return passkey;
+    bleServer->disconnect(bleConnectionId); return 0; // PIN pairing is not supported.
   }
   void onPassKeyNotify(uint32_t) override {
-    // Re-encryption of an existing bond does not need a passkey exchange.
-    // A spoofed bonded MAC must not open new pairing outside the physical setup window.
-    if (!setupOpen || (pairingFailures >= 5 && millis() - pairingBlockedAt < 60000)) bleServer->disconnect(bleConnectionId);
+    bleServer->disconnect(bleConnectionId);
   }
-  bool onConfirmPIN(uint32_t) override { return false; } // No numeric-comparison/Just Works downgrade.
+  bool onConfirmPIN(uint32_t) override { return false; } // Numeric comparison is not supported.
   bool onSecurityRequest() override {
     return peerKnown || (setupOpen && (pairingFailures < 5 || millis() - pairingBlockedAt >= 60000));
   }
   void onAuthenticationComplete(esp_ble_auth_cmpl_t auth) override {
     if (!bleConnected || memcmp(auth.bd_addr, peerAddress, 6)) return;
-    bool mitm = (auth.auth_mode & ESP_LE_AUTH_REQ_MITM) != 0;
     bool sc = (auth.auth_mode & ESP_LE_AUTH_REQ_SC_ONLY) != 0;
-    bleAuthenticated = auth.success && mitm && sc && (peerKnown || setupOpen);
+    bleAuthenticated = auth.success && sc && (peerKnown || setupOpen);
     if (!bleAuthenticated) {
       if (pairingFailures < 5) pairingFailures++;
       pairingBlockedAt = millis(); bleServer->disconnect(bleConnectionId);
@@ -158,7 +161,7 @@ class ServerEvents : public BLEServerCallbacks {
     memcpy(peerAddress, param->connect.remote_bda, 6);
     if (!setupOpen && !peerKnown) { bleServer->disconnect(bleConnectionId); return; }
     // Android explicitly initiates bonding after discovering services.
-    if (peerKnown) esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
+    if (peerKnown) esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_NO_MITM);
   }
   void onDisconnect(BLEServer*) override {
     bleAuthenticated = false; bleConnected = false; peerKnown = false; bleEpoch++;
@@ -431,6 +434,10 @@ static void telemetry() {
   doc["tds"] = analogRead(PIN_TDS) * (10000.0f / 4095);
   doc["ph"] = analogRead(PIN_PH) * (14.0f / 4095);
   doc["nitrogen"] = analogRead(PIN_NITROGEN) * (2000.0f / 4095);
+
+  Serial.printf("Telemetry: moisture=%.1f%%, nutrient=%.1f ppm, tds=%.1f ppm, ph=%.2f, nitrogen=%.1f ppm\n",
+                doc["moisture"].as<float>(), doc["nutrient"].as<float>(), doc["tds"].as<float>(),
+                doc["ph"].as<float>(), doc["nitrogen"].as<float>());
   // GPIO25/26 are ADC2 and cannot be sampled while Wi-Fi is running on classic ESP32.
   // Omit these fields rather than publish fabricated zeros. See hardware notes.
   if (WiFi.getMode() == WIFI_OFF) {
@@ -447,7 +454,9 @@ void setup() {
   water.begin(); nutrient.begin();
   incoming = xQueueCreate(6, sizeof(Frame)); outgoing = xQueueCreate(8, sizeof(Publish));
   configurations = xQueueCreate(1, sizeof(Config)); progress = xQueueCreate(8, sizeof(Progress));
-  if (!incoming || !outgoing || !configurations || !progress || !prefs.begin("tunas", false)) { Serial.println("Storage/queue initialization failed. Relays remain off."); for (;;) delay(1000); }
+  pumpEvents = xQueueCreate(8, sizeof(PumpEvent));
+  if (!incoming || !outgoing || !configurations || !progress || !pumpEvents || !prefs.begin("tunas", false)) { Serial.println("Storage/queue initialization failed. Relays remain off."); for (;;) delay(1000); }
+  Serial.println("[PUMP] water OFF; nutrient OFF (startup)");
   if (xTaskCreatePinnedToCore(safetyTask, "pump-safety", 2048, nullptr, 3, nullptr, 1) != pdPASS) { Serial.println("Safety task failed. Relays remain off."); for (;;) delay(1000); }
   analogReadResolution(12); analogSetAttenuation(ADC_11db);
   char suffix[13]; snprintf(suffix, sizeof(suffix), "%012llx", (unsigned long long)ESP.getEfuseMac()); deviceId = String("tunas-") + suffix;
@@ -456,20 +465,14 @@ void setup() {
   snprintf(ackTopic, sizeof(ackTopic), "tunas/%s/ack", deviceId.c_str());
   snprintf(statusTopic, sizeof(statusTopic), "tunas/%s/status", deviceId.c_str());
   snprintf(clientId, sizeof(clientId), "tunas-pot-%s", deviceId.c_str());
-  passkey = prefs.getUInt("passkey", 0);
-  if (passkey < 100000 || passkey > 999999) {
-    passkey = 100000 + esp_random() % 900000;
-    if (!prefs.putUInt("passkey", passkey)) { Serial.println("Could not persist passkey. Relays remain off."); for (;;) delay(1000); }
-    Serial.printf("FIRST BOOT ONLY — print a private sticker: node=%s, BLE code=%06lu\n", deviceId.c_str(), (unsigned long)passkey);
-  }
   Config stored = {}; setupOpen = !loadConfig("active", stored); setupStarted = millis();
   stage = setupOpen ? "setup" : "ble_only";
   BLEDevice::init(deviceId.c_str());
-  BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_MITM);
+  BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_NO_MITM);
   BLEDevice::setSecurityCallbacks(new Security());
   BLESecurity* security = new BLESecurity();
-  security->setStaticPIN(passkey); // setStaticPIN changes defaults, so set explicit policy AFTER it.
-  security->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND); security->setCapability(ESP_IO_CAP_OUT);
+  // Just Works: encrypted pairing without PIN, but no MITM protection during pairing.
+  security->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_BOND); security->setCapability(ESP_IO_CAP_NONE);
   security->setKeySize(16);
   uint8_t strictAuth = ESP_BLE_ONLY_ACCEPT_SPECIFIED_AUTH_ENABLE;
   esp_ble_gap_set_security_param(ESP_BLE_SM_ONLY_ACCEPT_SPECIFIED_SEC_AUTH, &strictAuth, sizeof(strictAuth));
@@ -479,24 +482,30 @@ void setup() {
   BLEService* service = bleServer->createService(SERVICE_UUID);
   rxCharacteristic = service->createCharacteristic(RX_UUID, BLECharacteristic::PROPERTY_NOTIFY);
   BLE2902* cccd = new BLE2902();
-  cccd->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM | ESP_GATT_PERM_WRITE_ENC_MITM); rxCharacteristic->addDescriptor(cccd);
+  cccd->setAccessPermissions(ESP_GATT_PERM_READ_ENCRYPTED | ESP_GATT_PERM_WRITE_ENCRYPTED); rxCharacteristic->addDescriptor(cccd);
   BLECharacteristic* tx = service->createCharacteristic(TX_UUID, BLECharacteristic::PROPERTY_WRITE);
-  tx->setAccessPermissions(ESP_GATT_PERM_WRITE_ENC_MITM); tx->setCallbacks(new CommandEvents());
+  tx->setAccessPermissions(ESP_GATT_PERM_WRITE_ENCRYPTED); tx->setCallbacks(new CommandEvents());
   identityCharacteristic = service->createCharacteristic(ID_UUID, BLECharacteristic::PROPERTY_READ);
-  identityCharacteristic->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM); identityCharacteristic->setCallbacks(new IdentityEvents());
+  identityCharacteristic->setAccessPermissions(ESP_GATT_PERM_READ_ENCRYPTED); identityCharacteristic->setCallbacks(new IdentityEvents());
   statusSnapshot = statusJson(); identityCharacteristic->setValue(statusSnapshot.c_str()); service->start();
   BLEAdvertising* advertising = BLEDevice::getAdvertising(); advertising->addServiceUUID(SERVICE_UUID); advertising->setScanResponse(true); advertising->start();
   WiFi.persistent(false); WiFi.setAutoReconnect(false); WiFi.mode(WIFI_STA); // Credentials belong only in our transactional NVS blobs.
   if (xTaskCreatePinnedToCore(networkTask, "network", 12288, nullptr, 1, nullptr, 0) != pdPASS) { stage = "ble_only"; Serial.println("Network task failed; Bluetooth remains available."); }
 }
 void loop() {
+  PumpEvent pumpEvent;
+  while (xQueueReceive(pumpEvents, &pumpEvent, 0) == pdTRUE) {
+    Serial.printf("[PUMP] %s GPIO%d %s source=%s %s=%lu ms\n",
+        pumpEvent.pin == PIN_WATER ? "water" : "nutrient", pumpEvent.pin,
+        pumpEvent.running ? "ON" : "OFF", pumpEvent.fromBle ? "BLE" : "MQTT",
+        pumpEvent.running ? "duration" : "elapsed", (unsigned long)pumpEvent.milliseconds);
+  }
   uint32_t now = millis();
   if (digitalRead(PIN_SETUP) == LOW) {
     if (!pressedAt) pressedAt = now;
     if (!buttonHandled && now - pressedAt >= 5000) {
       buttonHandled = true; setupOpen = true; setupStarted = now; stopPumps();
-      // Explicit local commissioning/recovery only. USB serial is a trusted physical channel.
-      Serial.printf("LOCAL SETUP — private sticker: node=%s, BLE code=%06lu\n", deviceId.c_str(), (unsigned long)passkey);
+      Serial.printf("LOCAL SETUP — node=%s, BLE pairing without PIN\n", deviceId.c_str());
       stage = "setup"; sendStatus();
     }
   } else { pressedAt = 0; buttonHandled = false; }
