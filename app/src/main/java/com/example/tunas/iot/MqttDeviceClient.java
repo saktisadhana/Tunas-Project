@@ -67,6 +67,8 @@ public final class MqttDeviceClient implements AutoCloseable {
         });
     }
     public boolean isConnected() { return session.isDeviceOnline(); }
+    public boolean isActive() { return client != null; }
+    public boolean isBusy() { return session.isCommandPending(); }
     public void command(String action, int value) { onMain(() -> commandOnMain(action, value)); }
 
     private void onMain(Runnable action) {
@@ -139,8 +141,12 @@ public final class MqttDeviceClient implements AutoCloseable {
                     new String[]{plan.telemetryTopic, plan.acknowledgementTopic, plan.statusTopic},
                     new int[]{0, 0, 0}, null, new IMqttActionListener() {
                         @Override public void onSuccess(IMqttToken token) {
+                            final int[] granted = token.getGrantedQos();
                             main.post(() -> {
                                 if (gen != generation) return;
+                                if (granted == null || granted.length != 3 || granted[0] == 128 || granted[1] == 128 || granted[2] == 128) {
+                                    disconnectOnMain("Could not subscribe to the pot. Check broker topic permissions."); return;
+                                }
                                 session.brokerConnected();
                             });
                         }

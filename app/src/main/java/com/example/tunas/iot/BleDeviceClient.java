@@ -17,6 +17,9 @@ import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanResult;
 import android.bluetooth.le.ScanSettings;
 import android.content.Context;
+import android.content.BroadcastReceiver;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Handler;
@@ -24,6 +27,7 @@ import android.os.Looper;
 import android.os.SystemClock;
 
 import org.json.JSONException;
+import org.json.JSONObject;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
@@ -46,15 +50,17 @@ public final class BleDeviceClient implements AutoCloseable {
         void onConnected(boolean connected);
         void onTelemetry(Telemetry telemetry);
         void onCommandResult(boolean success, String message);
+        default void onSetupStatus(NodeSetupStatus status) { }
     }
 
     // Proposed Tunas vendor protocol, NOT confirmed firmware assignments.
     public static final UUID PROVISIONAL_SERVICE_UUID = UUID.fromString("6f8a0001-7c2d-4e9f-a6b1-32d7c05e9140");
     public static final UUID PROVISIONAL_TELEMETRY_UUID = UUID.fromString("6f8a0002-7c2d-4e9f-a6b1-32d7c05e9140");
     public static final UUID PROVISIONAL_COMMAND_UUID = UUID.fromString("6f8a0003-7c2d-4e9f-a6b1-32d7c05e9140");
+    public static final UUID IDENTITY_UUID = UUID.fromString("6f8a0004-7c2d-4e9f-a6b1-32d7c05e9140");
     private static final UUID CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
     private static final long SCAN_MILLIS = 12_000;
-    private static final long SETUP_MILLIS = 20_000;
+    private static final long SETUP_MILLIS = 90_000;
     private final Context context;
     private final Listener listener;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -77,6 +83,22 @@ public final class BleDeviceClient implements AutoCloseable {
     private boolean writeInFlight;
     private String writingId;
     private IncomingMessage deferredAck;
+    private NodeSetupStatus nodeStatus;
+    private String provisioningId;
+    private Runnable provisioningTimeout;
+    private boolean awaitingBond;
+    private final BroadcastReceiver bonds = new BroadcastReceiver() {
+        @Override public void onReceive(Context owner, Intent intent) {
+            if (!BluetoothDevice.ACTION_BOND_STATE_CHANGED.equals(intent.getAction()) || gatt == null || !awaitingBond) return;
+            BluetoothDevice peer = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+            if (peer == null || !peer.equals(gatt.getDevice())) return;
+            int state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE);
+            if (state == BluetoothDevice.BOND_BONDED) {
+                awaitingBond = false;
+                configureServices(gatt, BluetoothGatt.GATT_SUCCESS);
+            } else if (state == BluetoothDevice.BOND_NONE) disconnectOnMain("BLE authentication failed or cancelled", null);
+        }
+    };
 
     public BleDeviceClient(Context context, Listener listener) {
         Context supplied = Objects.requireNonNull(context, "context");
@@ -85,11 +107,23 @@ public final class BleDeviceClient implements AutoCloseable {
         this.listener = Objects.requireNonNull(listener, "listener");
         BluetoothManager manager = this.context.getSystemService(BluetoothManager.class);
         this.adapter = manager == null ? null : manager.getAdapter();
+        IntentFilter filter = new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
+        if (Build.VERSION.SDK_INT >= 33) this.context.registerReceiver(bonds, filter, Context.RECEIVER_EXPORTED);
+        else this.context.registerReceiver(bonds, filter);
     }
 
     public void startScan() { onMain(this::startScanOnMain); }
     public void stopScan() { onMain(() -> stopScanOnMain(true)); }
     public void connect(String address) { onMain(() -> connectOnMain(address)); }
+    public void reconnectBonded(String address) {
+        onMain(() -> {
+            try {
+                if (!canUseBluetooth(Manifest.permission.BLUETOOTH_CONNECT)) return;
+                if (BluetoothAdapter.checkBluetoothAddress(address)
+                        && adapter.getRemoteDevice(address).getBondState() == BluetoothDevice.BOND_BONDED) connectOnMain(address);
+            } catch (SecurityException | IllegalArgumentException failure) { listener.onStatus("Reconnect requires the saved Bluetooth bond and Nearby devices permission"); }
+        });
+    }
     public void disconnect() {
         onMain(() -> {
             stopScanOnMain(false);
@@ -102,9 +136,27 @@ public final class BleDeviceClient implements AutoCloseable {
             closed = true;
             stopScanOnMain(false);
             disconnectOnMain("Client closed; previous sensor data is stale", null);
+            context.unregisterReceiver(bonds);
         });
     }
     public boolean isConnected() { return connected; }
+    public boolean isConnecting() { return gatt != null && !connected; }
+    public boolean isBusy() { return commands.isPending() || provisioningId != null || outgoing != null; }
+    public NodeSetupStatus nodeStatus() { return nodeStatus; }
+    public String address() {
+        try { return gatt == null ? "" : gatt.getDevice().getAddress(); }
+        catch (SecurityException revoked) { return ""; }
+    }
+    public void provision(ProvisioningConfig config) { onMain(() -> provisionOnMain(config)); }
+    public void finishSetup() {
+        onMain(() -> {
+            if (!connected || isBusy()) { listener.onStatus("Wait for the current transfer before closing setup"); return; }
+            outgoing = "{\"type\":\"setup_close\"}\n".getBytes(StandardCharsets.UTF_8);
+            sentOffset = 0;
+            provisioningTimeout = () -> disconnectOnMain("Close-setup transfer timed out; reconnect to inspect node status", null);
+            main.postDelayed(provisioningTimeout, 10_000); writeNextChunk();
+        });
+    }
     public void command(String action, int value) { onMain(() -> commandOnMain(action, value)); }
 
     private void onMain(Runnable action) {
@@ -251,12 +303,18 @@ public final class BleDeviceClient implements AutoCloseable {
                     return;
                 }
                 if (!handshake.subscriptionConfirmed()) return;
-                if (setupTimeout != null) main.removeCallbacks(setupTimeout);
-                setupTimeout = null;
-                connected = true;
-                listener.onConnected(true);
-                if (isCurrent(source) && connected) listener.onStatus("BLE ready; waiting for real sensor readings");
+                try {
+                    BluetoothGattCharacteristic identity = source.getService(PROVISIONAL_SERVICE_UUID).getCharacteristic(IDENTITY_UUID);
+                    if (identity == null || !source.readCharacteristic(identity)) disconnectOnMain("Could not read authenticated node identity", null);
+                } catch (SecurityException | IllegalStateException failure) { disconnectOnMain("Node identity read failed", null); }
             });
+        }
+        @Override public void onCharacteristicRead(BluetoothGatt source, BluetoothGattCharacteristic characteristic, int status) {
+            byte[] value = characteristic.getValue();
+            identityRead(source, characteristic.getUuid(), value == null ? null : value.clone(), status);
+        }
+        @Override public void onCharacteristicRead(BluetoothGatt source, BluetoothGattCharacteristic characteristic, byte[] value, int status) {
+            identityRead(source, characteristic.getUuid(), value == null ? null : value.clone(), status);
         }
         @Override public void onCharacteristicChanged(BluetoothGatt source, BluetoothGattCharacteristic characteristic) {
             // API 31-32 values are mutable; snapshot on the callback thread before posting.
@@ -277,6 +335,7 @@ public final class BleDeviceClient implements AutoCloseable {
                     writeNextChunk();
                 } else {
                     outgoing = null;
+                    if (provisioningId == null) clearProvisioning();
                     IncomingMessage ack = deferredAck;
                     deferredAck = null;
                     if (ack != null) handleAcknowledgement(ack);
@@ -302,9 +361,16 @@ public final class BleDeviceClient implements AutoCloseable {
             boolean notify = (rxProperties & BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0;
             boolean indicate = (rxProperties & BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0;
             BluetoothGattDescriptor cccd = rx == null ? null : rx.getDescriptor(CCCD_UUID);
-            if (tx == null || (tx.getProperties() & BluetoothGattCharacteristic.PROPERTY_WRITE) == 0
+            if (service == null || service.getCharacteristic(IDENTITY_UUID) == null || tx == null || (tx.getProperties() & BluetoothGattCharacteristic.PROPERTY_WRITE) == 0
                     || (!notify && !indicate) || cccd == null) {
                 disconnectOnMain("Device does not expose the provisional Tunas GATT protocol", null);
+                return;
+            }
+            if (source.getDevice().getBondState() != BluetoothDevice.BOND_BONDED) {
+                awaitingBond = true;
+                listener.onStatus("Enter the node's unique 6-digit sticker code in Android's Bluetooth pairing dialog");
+                if (source.getDevice().getBondState() == BluetoothDevice.BOND_NONE && !source.getDevice().createBond())
+                    disconnectOnMain("Could not start authenticated BLE pairing", null);
                 return;
             }
             if (!handshake.servicesResolved()) return;
@@ -332,10 +398,40 @@ public final class BleDeviceClient implements AutoCloseable {
         });
     }
 
+    private void identityRead(BluetoothGatt source, UUID uuid, byte[] value, int status) {
+        main.post(() -> {
+            if (!isCurrent(source) || connected || !IDENTITY_UUID.equals(uuid)) return;
+            try {
+                if (status != BluetoothGatt.GATT_SUCCESS || value == null
+                        || source.getDevice().getBondState() != BluetoothDevice.BOND_BONDED)
+                    throw new IllegalArgumentException("Authentication required");
+                nodeStatus = NodeSetupStatus.decode(FlatJson.fields(new String(value, StandardCharsets.UTF_8), NodeSetupStatus.KEYS));
+                if (setupTimeout != null) main.removeCallbacks(setupTimeout);
+                setupTimeout = null;
+                connected = true;
+                listener.onSetupStatus(nodeStatus);
+                listener.onConnected(true);
+                listener.onStatus("Authenticated BLE ready: " + nodeStatus.deviceId);
+            } catch (JSONException | IllegalArgumentException | SecurityException failure) {
+                disconnectOnMain("Authenticated node identity could not be verified", null);
+            }
+        });
+    }
+
     private void handleLine(String line) {
         if (!connected || closed) return;
         IncomingMessage message;
         try {
+            java.util.Map<String, Object> setup = FlatJson.fields(line, NodeSetupStatus.KEYS);
+            if ("setup".equals(setup.get("type"))) {
+                NodeSetupStatus status = NodeSetupStatus.decode(setup);
+                if (nodeStatus == null || !nodeStatus.deviceId.equals(status.deviceId)) throw new IllegalArgumentException("Identity changed");
+                nodeStatus = status;
+                if (status.requestId.equals(provisioningId) && ((status.mqttReady && "ready".equals(status.stage)) || status.stage.endsWith("failed")
+                        || status.stage.equals("ble_only") || status.stage.equals("invalid_config"))) clearProvisioning();
+                listener.onSetupStatus(status);
+                return;
+            }
             message = IncomingMessage.decode(FlatJson.fields(line, FlatJson.KEYS), System.currentTimeMillis());
         } catch (JSONException | IllegalArgumentException invalid) {
             listener.onStatus("Discarded malformed BLE protocol frame");
@@ -360,6 +456,7 @@ public final class BleDeviceClient implements AutoCloseable {
     }
 
     private void commandOnMain(String action, int value) {
+        if (provisioningId != null || outgoing != null) { listener.onCommandResult(false, "Another BLE transfer is in progress"); return; }
         String id = UUID.randomUUID().toString();
         try {
             commands.begin(!closed && connected && gatt != null, id, action, value, SystemClock.elapsedRealtime());
@@ -386,6 +483,37 @@ public final class BleDeviceClient implements AutoCloseable {
         };
         main.postDelayed(commandTimeout, CommandTracker.TIMEOUT_MILLIS);
         writeNextChunk();
+    }
+
+    private void provisionOnMain(ProvisioningConfig config) {
+        if (!connected || nodeStatus == null || !nodeStatus.setupOpen || isBusy()
+                || !nodeStatus.deviceId.equals(config.broker.deviceId)) {
+            listener.onStatus("Open Setup on the authenticated node before sending configuration"); return;
+        }
+        try {
+            JSONObject json = new JSONObject();
+            json.put("type", "provision"); json.put("id", config.requestId); json.put("deviceId", config.broker.deviceId);
+            json.put("ssid", config.ssid); json.put("wifiPassword", config.wifiPassword);
+            json.put("host", config.broker.host); json.put("port", config.broker.port);
+            json.put("username", config.broker.username); json.put("password", config.broker.password); json.put("ca", config.ca);
+            outgoing = (json.toString() + "\n").getBytes(StandardCharsets.UTF_8);
+            if (outgoing.length > 2048) throw new IllegalArgumentException("Configuration is too large");
+            provisioningId = config.requestId;
+            sentOffset = 0; deferredAck = null;
+            provisioningTimeout = () -> {
+                if (outgoing != null) disconnectOnMain("Configuration transfer timed out; reconnect to inspect setup", null);
+                else { clearProvisioning(); listener.onStatus("Setup result timed out; BLE remains available. Reconnect to inspect node status."); }
+            };
+            main.postDelayed(provisioningTimeout, 120_000);
+            writeNextChunk();
+        } catch (JSONException | IllegalArgumentException failure) {
+            outgoing = null; clearProvisioning(); listener.onStatus("Could not encode setup configuration");
+        }
+    }
+
+    private void clearProvisioning() {
+        if (provisioningTimeout != null) main.removeCallbacks(provisioningTimeout);
+        provisioningTimeout = null; provisioningId = null;
     }
 
     private void writeNextChunk() {
@@ -431,6 +559,9 @@ public final class BleDeviceClient implements AutoCloseable {
         boolean hadConnection = previous != null || connected;
         gatt = null; // Ignore callbacks from this session before releasing the native object.
         connected = false;
+        awaitingBond = false;
+        nodeStatus = null;
+        clearProvisioning();
         handshake.reset();
         commandCharacteristic = null;
         telemetryCharacteristic = null;

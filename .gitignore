@@ -14,3 +14,4 @@
 .cxx
 local.properties
 firmware/**/secrets.h
+firmware/**/.pio/

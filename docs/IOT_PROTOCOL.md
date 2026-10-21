@@ -1,8 +1,10 @@
 # Tunas device boundary — provisional protocol
 
+**Pairing/transport update:** `PAIRING.md` specifies authenticated BLE provisioning, the new identity characteristic, Preferences transactions, setup-button behavior and foreground BLE/MQTT recovery. It supersedes the original unauthenticated pairing/manual-only connection assumptions. Hardware remains uncommissioned.
+
 ## Status and limits
 
-The Android client uses the real `BluetoothLeScanner` and `BluetoothGatt` APIs for nearby pots, and Eclipse Paho over TLS for a broker the user types in. There are no simulated devices, generated sensor readings, timer-driven connection successes, automatic actuator operations, reconnects, queued offline commands, or command retries.
+The Android client uses the real `BluetoothLeScanner` and `BluetoothGatt` APIs for nearby pots, and Eclipse Paho over TLS for a user-configured broker. There are no simulated devices, generated sensor readings, timer-driven connection successes, automatic actuator operations, queued offline commands, or command retries. Foreground connection recovery is allowed, never command replay.
 
 **No Tunas hardware specification or physical peripheral was supplied. All vendor UUIDs, field units, limits, and message semantics below are proposed, not verified firmware compatibility.** A device advertising the name “Tunas” is not proof of identity. Do not deploy physical controls until the hardware checklist below is completed.
 
@@ -37,21 +39,22 @@ Calls can originate on any thread; operations and **all callbacks run on the mai
 
 - Request `BLUETOOTH_SCAN` and `BLUETOOTH_CONNECT` before scanning, and `BLUETOOTH_CONNECT` before connecting. The project has minSdk 31. The client checks grants and handles operation-time permission revocation but never opens a permission dialog. The app may use `neverForLocation` for scan permission when appropriate; this boundary neither requests nor uses location.
 - A scan lasts at most 12 seconds, can be stopped early, and emits only actual advertisements. It intentionally does not filter on the provisional service UUID, because firmware advertising is unknown. Results may repeat as RSSI changes; the UI should deduplicate by address. An absent advertised name is labeled “Unnamed BLE device,” not inferred to be Tunas.
-- `connect(address)` stops scanning, releases the previous GATT session, uses `autoConnect=false` and LE transport, and waits for real callbacks. Setup has a 20-second **failure-only** timeout.
-- A radio link alone is not ready. `onConnected(true)` occurs only after successful service discovery, characteristic/property checks, local notification registration, and a successful CCCD write callback.
-- On disconnect, setup failure after obtaining a GATT handle, close, write failure, or command timeout: clear native references and buffers, fail pending work, close the GATT handle, and ignore callbacks belonging to that old handle. There is no automatic reconnect.
+- `connect(address)` stops scanning, releases the previous GATT session, uses `autoConnect=false` and LE transport, and waits for real callbacks. Setup has a 90-second **failure-only** timeout, including the system passkey dialog.
+- A radio link alone is not ready. `onConnected(true)` requires service/property checks, authenticated bonding, local notification registration, a successful CCCD write and a valid encrypted identity read. See `PAIRING.md`; the extended setup deadline is 90 seconds for passkey entry.
+- On disconnect, setup failure after obtaining a GATT handle, close, write failure, or command timeout: clear native references and buffers, fail pending work, close the GATT handle, and ignore callbacks belonging to that old handle. The Activity may later reconnect the remembered node while foregrounded; no command is restored.
 - Treat every `onConnected(false)` as invalidating all prior measurements. Keep old readings only as visibly stale history, never live values. The client does not retain or republish a telemetry cache. Also expire data when no new telemetry arrives within an app-defined freshness window; a connected radio is not evidence of a healthy sensor stream. Missing fields are unknown **for that frame** and must not become zero or retain an old value with a new timestamp.
 - Call `disconnect()` when leaving the foreground if monitoring should end, and `close()` when the owner is destroyed. Close is idempotent and terminal; create a new client for a new lifecycle. Close emits final disconnected/status/pending-command-failure callbacks; old asynchronous radio callbacks are subsequently ignored. Explicit calls made after close are rejected rather than reconnecting.
 
 ## Proposed GATT profile
 
-These three vendor UUIDs are **PROVISIONAL** and exposed as `PROVISIONAL_*_UUID` constants:
+These vendor UUIDs remain **PROVISIONAL** with respect to uncommissioned hardware:
 
 | Role | UUID | Required behavior |
 | --- | --- | --- |
 | Service | `6f8a0001-7c2d-4e9f-a6b1-32d7c05e9140` | Primary Tunas service |
 | Telemetry / acknowledgement | `6f8a0002-7c2d-4e9f-a6b1-32d7c05e9140` | Notify or indicate; notify preferred if both supported |
 | Commands | `6f8a0003-7c2d-4e9f-a6b1-32d7c05e9140` | Write with response, not write-without-response |
+| Authenticated identity/setup | `6f8a0004-7c2d-4e9f-a6b1-32d7c05e9140` | Read; encrypted/MITM, see `PAIRING.md` |
 | Standard CCCD | `00002902-0000-1000-8000-00805f9b34fb` | `01 00` for notify, or `02 00` for indicate |
 
 CCCD writes and command chunks are serialized. API 33+ uses value-taking GATT write APIs; API 31–32 uses the platform legacy setters and write calls. Both notification callback variants are implemented; mutable byte arrays are copied before posting to the main thread.
@@ -119,7 +122,7 @@ Acknowledgement timeout is **10 seconds from command submission**, including chu
 
 MQTT carries the same telemetry, command and ack objects as BLE. It is not a Tunas account. The phone connects with TLS to the broker the user entered (host, port, username, password, device id). There is no default broker. The password is kept in encrypted app prefs (`EncryptedSharedPreferences`), which are already excluded from backup.
 
-The client disconnects when the app leaves the foreground, same as BLE. No auto-reconnect and no command replay. `MqttDeviceClient.isConnected()` means the pot has been seen (status or telemetry), not merely that the broker socket is up. Until then, water, nutrition and target commands are rejected.
+The client disconnects when the app stops, same as BLE. The foreground Activity can recover connections at spaced intervals; command replay is forbidden. `MqttDeviceClient.isConnected()` means the pot has been seen (status or telemetry), not merely that the broker socket is up. Until then, water, nutrition and target commands are rejected. Freshness is tracked separately per transport, with fresh MQTT preferred and BLE available nearby.
 
 ### Topic scheme
 
@@ -178,11 +181,11 @@ The phone always connects with an `ssl://` URI (EMQX Cloud Serverless and HiveMQ
 
 ### Reference sketch
 
-`firmware/tunas_pot/` is an ESP32 Arduino sketch (WiFiClientSecure + PubSubClient) that publishes these topics, applies a 30-second pump cap, stops relays when MQTT drops, and deduplicates the last command id. It stores a moisture target and does **not** run a pump on its own when the target changes. NPK/TDS/pH/moisture reads are uncalibrated analog placeholders, not a claim of sensor-library compatibility. Copy `secrets.example.h` to `secrets.h` (gitignored) and fill in Wi-Fi, host, port 8883, username, password, and device ID. The device ID must match the one entered in the app. `MQTT_CA_CERT` defaults to DigiCert Global Root CA for EMQX Cloud Serverless (`root_ca.h`). HiveMQ Cloud needs `ISRG_ROOT_X1` instead. Do not commit Wi-Fi or broker passwords. Setup steps are in `firmware/tunas_pot/README.md`.
+`firmware/tunas_pot/` now targets classic ESP32 Arduino 2.0.17 with authenticated BLE, Preferences, ArduinoJson and asynchronous ESP-MQTT over verified TLS. It keeps the existing topics, a separate pump-safety task, 30-second cap and shared bounded command-ID deduplication. Relays stop on loss of their originating transport or setup entry. A moisture target does **not** start autonomous watering. Sensor formulas remain uncalibrated analog placeholders; ADC2 phosphorus/potassium on GPIO25/26 are omitted with Wi-Fi enabled. Configure Wi-Fi/broker and choose the compiled CA over BLE; `secrets.h` is no longer required. See `PAIRING.md` and `firmware/tunas_pot/README.md` for setup and limits.
 
 ## Security and commissioning
 
-BLE names, addresses and service UUIDs are discoverability information, not authentication. This implementation does not invent bonding credentials or a device-authentication protocol. The peripheral must require an appropriate authenticated/encrypted link and authorize actuator writes, or a documented application-level authentication protocol must be designed with the firmware. Do not mistake selecting an advertisement for secure pairing.
+BLE names, addresses and service UUIDs are discoverability information, not authentication. The reference firmware now requires LE Secure Connections with MITM-protected bonding using a private per-node sticker passkey; GATT commands/identity/CCCD require authenticated encryption. Android uses the system pairing dialog and reads the node's identity before accepting it. This authenticates passkey possession, not a cloud account; physical key storage and actual interoperability still need verification. See `PAIRING.md`. Do not mistake selecting an advertisement for secure pairing.
 
 Before physical use, verify on real target hardware:
 

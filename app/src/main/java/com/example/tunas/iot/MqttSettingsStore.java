@@ -55,6 +55,41 @@ public final class MqttSettingsStore {
         }
     }
 
+    public void rememberNode(String address, String deviceId) {
+        if (address.isEmpty() || (address.equals(bleAddress()) && deviceId.equals(bleDeviceId()))) return;
+        if (!preferences.edit().putString("ble_address", address).putString("ble_device", deviceId).commit())
+            throw new IllegalStateException("Could not remember the authenticated node.");
+    }
+    public String bleAddress() { return preferences.getString("ble_address", ""); }
+    public String bleDeviceId() { return preferences.getString("ble_device", ""); }
+    public void forgetNode() {
+        if (!preferences.edit().remove("ble_address").remove("ble_device").commit())
+            throw new IllegalStateException("Could not clear the previous Bluetooth association.");
+    }
+
+    public void savePending(ProvisioningConfig config) {
+        SharedPreferences.Editor editor = preferences.edit().putString("pending_id", config.requestId);
+        for (Map.Entry<String, String> field : MqttSettingsFields.write(config.broker).entrySet())
+            editor.putString("pending_" + field.getKey(), field.getValue());
+        if (!editor.commit()) throw new IllegalStateException("Could not securely save pending setup.");
+        // Wi-Fi credentials and the BLE passkey are deliberately not persisted on the phone.
+    }
+
+    public boolean promote(NodeSetupStatus status) {
+        if (!status.mqttReady || !"ready".equals(status.stage) || status.requestId.isEmpty()
+                || !status.requestId.equals(preferences.getString("pending_id", ""))) return false;
+        Map<String, String> fields = new LinkedHashMap<>();
+        for (String key : MqttSettingsFields.KEYS) fields.put(key, preferences.getString("pending_" + key, null));
+        MqttBrokerConfig config = MqttSettingsFields.read(fields);
+        if (config == null || !status.confirms(preferences.getString("pending_id", ""), config.deviceId)) return false;
+        SharedPreferences.Editor editor = preferences.edit().remove("pending_id");
+        for (Map.Entry<String, String> field : MqttSettingsFields.write(config).entrySet()) {
+            editor.putString(field.getKey(), field.getValue()); editor.remove("pending_" + field.getKey());
+        }
+        if (!editor.commit()) throw new IllegalStateException("Could not save verified broker settings.");
+        return true;
+    }
+
     public void clear() {
         if (!preferences.edit().clear().commit()) {
             throw new IllegalStateException("Could not forget the MQTT broker on this phone.");

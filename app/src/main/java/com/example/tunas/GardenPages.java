@@ -31,6 +31,7 @@ final class GardenPages {
     private TextView pairStatus, commandStatus, moistureValue, nutrientValue, liveStatus, maintenanceLink, extraReadings, mqttFormStatus;
     private LinearLayout deviceResults, pairBody;
     private Boolean pairBuiltOnline;
+    private String pairBuiltKey;
     private String livePrefix = "";
     private final Map<String, String> found = new LinkedHashMap<>();
     private final Map<String, String> roomStates = new HashMap<>();
@@ -439,27 +440,35 @@ final class GardenPages {
 
     void pair() {
         LinearLayout column = host.page("pair"); back(column, this::maintenance); ui.add(column, ui.title("Pair Sensor")); ui.gap(column, 12);
-        ui.add(column, ui.text("Use Bluetooth when the pot is nearby. To reach it from another network, connect over MQTT with TLS. Tunas works with sensors running the Tunas firmware.", 17, false)); ui.gap(column, 20);
+        ui.add(column, ui.text("Turn on the node, scan nearby devices and enter its unique sticker code in Android's pairing dialog. Send Wi-Fi and MQTT settings securely over Bluetooth. Bluetooth also works without internet.", 17, false)); ui.gap(column, 20);
         pairStatus = ui.text(pairStatusText(), 17, true); pairStatus.setBackground(ui.shape(0x59A2B595, 14)); ui.pad(pairStatus, 14); pairStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE); ui.add(column, pairStatus); ui.gap(column, 16);
-        pairBody = ui.column(); ui.add(column, pairBody); deviceResults = null; pairBuiltOnline = null;
+        pairBody = ui.column(); ui.add(column, pairBody); deviceResults = null; pairBuiltOnline = null; pairBuiltKey = null;
         connectionChanged();
     }
     void connectionChanged() {
         if (!host.screen.equals("pair") || pairBody == null || pairStatus == null) return;
         pairStatus.setText(pairStatusText());
         boolean online = host.linkUp();
-        if (pairBuiltOnline != null && pairBuiltOnline == online && pairBody.getChildCount() > 0) {
+        String key = (host.bleOnline() ? "BLE" : host.mqttOnline() ? "MQTT" : "Offline") + ":"
+                + (host.setupStatus == null ? "" : host.setupStatus.deviceId + ":" + host.setupStatus.setupOpen);
+        if (key.equals(pairBuiltKey) && pairBody.getChildCount() > 0) {
             showMqttFormStatus();
             return;
         }
         pairBuiltOnline = online;
+        pairBuiltKey = key;
         pairBody.removeAllViews();
         mqttFormStatus = null;
-        if (host.mqttOnline()) buildAssignedLink("MQTT", "Connected over MQTT. Readings show up on Home after the pot sends a report.", () -> host.mqtt.disconnect());
-        else if (host.bleOnline()) buildAssignedLink("BLE", "Connected over Bluetooth. Readings show up on Home after the sensor sends its first report.", () -> host.device.disconnect());
+        if (host.linkUp()) {
+            buildAssignedLink(host.linkLabel(), "MQTT is preferred when fresh readings arrive. Authenticated Bluetooth remains available nearby, including without Wi-Fi or internet.", host::disconnectLinks);
+            if (host.bleOnline() && host.setupStatus != null) buildNodeSetup();
+        }
         else buildOfflinePairing();
     }
     private String pairStatusText() {
+        if (host.setupStatus != null && host.bleOnline()) return host.linkLabel() + " · " + host.setupStatus.deviceId
+                + "\nSetup: " + host.setupStatus.stage.replace('_', ' ')
+                + (host.setupStatus.mqttReady ? "\nNode MQTT ready" : "\nBluetooth available; MQTT not ready");
         if (host.mqttOnline()) return "MQTT";
         if (host.bleOnline()) return "BLE";
         return host.connectionStatus == null || host.connectionStatus.isEmpty() ? "Offline" : host.connectionStatus;
@@ -531,6 +540,49 @@ final class GardenPages {
                 } catch (IllegalStateException e) { feedback.setText(e.getMessage()); }
             }));
         }
+    }
+
+    private void buildNodeSetup() {
+        ui.divider(pairBody, 16);
+        ui.add(pairBody, ui.text("Node setup", 20, true)); ui.gap(pairBody, 8);
+        if (!host.setupStatus.setupOpen) {
+            ui.add(pairBody, ui.text("Hold the node's Setup button for 5 seconds to change Wi-Fi or MQTT. Pumps stop while setup is open. Existing configuration is kept until its replacement is verified.", 16, false));
+            return;
+        }
+        final String nodeId = host.setupStatus.deviceId;
+        ui.add(pairBody, ui.text("Setup is open for 5 minutes; pump controls are paused until it closes. Use a 2.4 GHz Wi-Fi network. A failed network setup does not disable Bluetooth.", 16, false)); ui.gap(pairBody, 12);
+        ui.add(pairBody, ui.button("Use Bluetooth now / close setup", false, () -> host.device.finishSetup())); ui.gap(pairBody, 12);
+        MqttBrokerConfig saved = host.mqttSettings == null ? null : host.mqttSettings.load();
+        if (saved != null && !saved.deviceId.equals(nodeId)) saved = null;
+        final MqttBrokerConfig existing = saved;
+        EditText ssid = ui.input("Wi-Fi network name", InputType.TYPE_CLASS_TEXT);
+        EditText wifiPassword = ui.input("Wi-Fi password", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        EditText broker = ui.input("Broker host", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        EditText port = ui.input("8883", InputType.TYPE_CLASS_NUMBER); port.setText(saved == null ? "8883" : Integer.toString(saved.port));
+        EditText username = ui.input("Broker username", InputType.TYPE_CLASS_TEXT);
+        EditText password = ui.input("Broker password", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        if (saved != null) { broker.setText(saved.host); username.setText(saved.username); }
+        Spinner ca = select("Broker certificate authority", new String[]{"DigiCert Global Root CA (EMQX)", "ISRG Root X1 (HiveMQ)"});
+        host.field(pairBody, "Wi-Fi SSID", ssid); host.field(pairBody, "Wi-Fi password (blank for open Wi-Fi)", wifiPassword);
+        host.field(pairBody, "Broker host", broker); host.field(pairBody, "TLS port", port);
+        host.field(pairBody, "Broker username", username); host.field(pairBody, "Broker password", password);
+        if (saved != null) ui.add(pairBody, ui.caption("Leave the broker password blank to keep it for the same broker and username."));
+        host.field(pairBody, "Trusted certificate authority", ca);
+        ui.add(pairBody, ui.caption("Verify the broker's actual certificate chain; a provider name alone does not guarantee its CA."));
+        ui.add(pairBody, ui.caption("Device ID: " + nodeId + ". This identity is read from the authenticated node, not entered manually."));
+        TextView feedback = error(pairBody);
+        ui.add(pairBody, ui.button("Send setup over Bluetooth", true, () -> {
+            try {
+                int number = Integer.parseInt(port.getText().toString().trim());
+                MqttBrokerConfig config = MqttBrokerConfig.create(broker.getText().toString(), number, username.getText().toString(), password.getText().toString(), nodeId);
+                if (config.password.isEmpty() && existing != null && config.host.equals(existing.host)
+                        && config.port == existing.port && config.username.equals(existing.username))
+                    config = MqttBrokerConfig.create(config.host, config.port, config.username, existing.password, nodeId);
+                host.provisionNode(new com.example.tunas.iot.ProvisioningConfig(ssid.getText().toString(), wifiPassword.getText().toString(), ca.getSelectedItemPosition() == 0 ? "digicert" : "isrg", config));
+                host.hideKeyboard(); wifiPassword.setText(""); password.setText("");
+                feedback.setText("Configuration sent for testing. Watch the setup status above; no pump command is queued.");
+            } catch (IllegalArgumentException | IllegalStateException failure) { feedback.setText(failure.getMessage()); }
+        }));
     }
     private void showMqttFormStatus() {
         if (mqttFormStatus == null) return;
