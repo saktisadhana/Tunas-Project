@@ -1,5 +1,15 @@
 # Verification and anti-slop review
 
+## BLE provisioning / fallback update
+
+- `:app:testDebugUnitTest`: **78 tests, 0 failures, 0 errors, 0 skipped**. New coverage validates provisioning field/UTF-8 limits, CA selection, transaction/device correlation and independent BLE/MQTT freshness/fallback.
+- `:app:assembleDebug`, `:app:assembleDebugAndroidTest` and `:app:lintDebug`: successful; **0 errors/fatal issues, 35 warnings**. These builds do not execute Android instrumentation or open a BLE radio/broker socket.
+- The ESP32 reference target compiles with `firmware/tunas_pot/platformio.ini` (espressif32 6.9.0 / Arduino-ESP32 2.0.17). This is compilation evidence only, not a successful flash, pairing, TLS session or physical actuator test.
+- Current APK: `app/build/outputs/apk/debug/app-debug.apk`. Existing `dist/` metadata/screenshots and the baseline instrumentation counts below describe the older delivery; they were not regenerated for this update.
+- Physical acceptance remains outstanding: `PAIRING.md` lists wrong-passkey rejection, Setup-button operation, NVS rollback/power-loss recovery, no-internet BLE controls, transport handover, malformed/retained commands and pump cutoff under network failure.
+
+The following original checks are retained as historical evidence, not re-executed results for this pairing update.
+
 ## Executed checks
 
 - Final debug build and test APK compiled successfully with the existing Gradle wrapper.
