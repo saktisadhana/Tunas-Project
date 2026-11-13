@@ -29,6 +29,8 @@ final class GardenPages {
     private String query = "";
     private int lightFilter, waterFilter;
     private TextView pairStatus, commandStatus, moistureValue, nutrientValue, liveStatus, maintenanceLink, extraReadings, mqttFormStatus;
+    private TextView sensorCount;
+    private Button pairButton;
     private LinearLayout deviceResults, pairBody;
     private Boolean pairBuiltOnline;
     private String pairBuiltKey;
@@ -38,14 +40,20 @@ final class GardenPages {
     private final Set<String> collapsed = new HashSet<>();
     private boolean commandPending;
     String routeSpecies = "Monstera", routePlant = "";
+    int historyMetric;
+    private boolean historyWeek;
+    private com.example.tunas.ui.HistoryChart historyChart;
+    private TextView historyLatest, historyLow, historyHigh, historyCount;
 
     GardenPages(MainActivity host) { this.host = host; ui = host.ui; store = host.store; }
 
     void saveState(android.os.Bundle out) {
         out.putBoolean("myPlants", myPlants); out.putString("query", query); out.putInt("lightFilter", lightFilter); out.putInt("waterFilter", waterFilter);
+        out.putInt("historyMetric", historyMetric); out.putBoolean("historyWeek", historyWeek);
     }
     void restoreState(android.os.Bundle state) {
         myPlants = state.getBoolean("myPlants"); query = state.getString("query", ""); lightFilter = state.getInt("lightFilter"); waterFilter = state.getInt("waterFilter");
+        historyMetric = state.getInt("historyMetric"); historyWeek = state.getBoolean("historyWeek");
     }
     void editPlant(String id) { AppStore.Plant plant = findPlant(id); if (plant == null) library(); else plantForm(plant.species, plant); }
     String date(long time) { return DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(new Date(time)); }
@@ -285,12 +293,76 @@ final class GardenPages {
         }
     }
 
+    void history(int metric) {
+        historyMetric = Math.max(0, Math.min(com.example.tunas.data.SensorHistory.METRICS - 1, metric));
+        LinearLayout column = host.page("history"); back(column, host::showHome);
+        ui.add(column, ui.title(MainActivity.METRIC_LABELS[historyMetric] + " history")); ui.gap(column, 6);
+        ui.add(column, ui.caption("Tunas saves readings while the app is open and a sensor is connected. It keeps the last 7 days on this phone."));
+        ui.gap(column, 16);
+        HorizontalScrollView strip = new HorizontalScrollView(host); strip.setHorizontalScrollBarEnabled(false);
+        LinearLayout chips = ui.row(); strip.addView(chips);
+        for (int i = 0; i < MainActivity.METRIC_LABELS.length; i++) {
+            final int pick = i;
+            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-2, ui.dp(48)); p.rightMargin = ui.dp(8);
+            chips.addView(chip(MainActivity.METRIC_LABELS[i], i == historyMetric, () -> history(pick)), p);
+        }
+        ui.add(column, strip); ui.gap(column, 14);
+        LinearLayout card = panel(column, 14);
+        LinearLayout range = ui.row();
+        weight(range, chip("24 hours", !historyWeek, () -> { historyWeek = false; history(historyMetric); }), true);
+        weight(range, chip("7 days", historyWeek, () -> { historyWeek = true; history(historyMetric); }), false);
+        ui.add(card, range); ui.gap(card, 14);
+        historyChart = new com.example.tunas.ui.HistoryChart(host);
+        historyChart.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+        card.addView(historyChart, new LinearLayout.LayoutParams(-1, ui.dp(220)));
+        ui.divider(card, 12);
+        LinearLayout stats = ui.row();
+        historyLatest = stat(stats, "Latest", true); historyLow = stat(stats, "Low", true); historyHigh = stat(stats, "High", false);
+        ui.add(card, stats); ui.gap(card, 10);
+        historyCount = ui.caption(""); ui.add(card, historyCount);
+        renderHistory();
+    }
+    /** Fills the chart and numbers in place, so a new reading doesn't rebuild the screen. */
+    void renderHistory() {
+        if (historyChart == null || !host.screen.equals("history")) return;
+        long to = System.currentTimeMillis(), from = to - (historyWeek ? com.example.tunas.data.SensorHistory.KEEP_MILLIS : 24L * 60 * 60_000);
+        List<com.example.tunas.data.SensorHistory.Sample> samples = host.history.since(from);
+        boolean percent = historyMetric != 2 && historyMetric != 4; // nutrient (µS/cm) and temperature use their own scale
+        historyChart.show(samples, historyMetric, from, to, percent, historyWeek);
+        double latest = Double.NaN, low = Double.MAX_VALUE, high = -Double.MAX_VALUE; int count = 0;
+        for (com.example.tunas.data.SensorHistory.Sample s : samples) {
+            double v = s.values[historyMetric];
+            if (Double.isNaN(v)) continue;
+            latest = v; low = Math.min(low, v); high = Math.max(high, v); count++;
+        }
+        String unit = MainActivity.METRIC_UNITS[historyMetric];
+        historyLatest.setText(count == 0 ? "--" : reading(latest) + unit);
+        historyLow.setText(count == 0 ? "--" : reading(low) + unit);
+        historyHigh.setText(count == 0 ? "--" : reading(high) + unit);
+        String period = historyWeek ? "in the last 7 days" : "in the last 24 hours";
+        historyCount.setText(count == 0 ? "No saved readings " + period + ". Pair a sensor from Maintenance to start."
+            : count + (count == 1 ? " saved reading " : " saved readings ") + period + ".");
+        historyChart.setContentDescription(MainActivity.METRIC_LABELS[historyMetric] + " chart. " + historyCount.getText()
+            + (count == 0 ? "" : " Latest " + historyLatest.getText() + ", low " + historyLow.getText() + ", high " + historyHigh.getText() + "."));
+    }
+    private String reading(double value) { return String.format(Locale.getDefault(), historyMetric == 4 ? "%.1f" : "%.0f", value); }
+    private TextView stat(LinearLayout row, String name, boolean gap) {
+        LinearLayout cell = ui.column(); TextView value = ui.lifted(ui.text("--", 20, true));
+        ui.add(cell, value); ui.gap(cell, 2); ui.add(cell, ui.caption(name)); weight(row, cell, gap); return value;
+    }
+    private Button chip(String label, boolean selected, Runnable click) {
+        Button chip = ui.button(label, selected, click); chip.setTextSize(14); chip.setElevation(0);
+        chip.setMinWidth(0); chip.setMinimumWidth(0); chip.setPadding(ui.dp(16), 0, ui.dp(16), 0);
+        ui.clickable(chip, selected ? ui.shape(ui.olive, 24) : ui.outlined(ui.cream, 24, ui.sage), 24, click);
+        chip.setSelected(selected); return chip;
+    }
+
     void maintenance() {
         LinearLayout column = host.page("maintenance");
-        moistureValue = nutrientValue = liveStatus = commandStatus = maintenanceLink = extraReadings = null;
+        moistureValue = nutrientValue = liveStatus = commandStatus = maintenanceLink = extraReadings = sensorCount = null; pairButton = null;
         LinearLayout status = ui.row(); status.setPadding(ui.dp(18), ui.dp(12), ui.dp(12), ui.dp(12)); ui.card(status, 10, 5);
-        TextView online = ui.lifted(ui.text(host.linkUp() ? "1 Sensor Online" : "0 Sensors Online", 20, true));
-        status.addView(online, new LinearLayout.LayoutParams(0, -2, 1));
+        sensorCount = ui.lifted(ui.text(host.linkUp() ? "1 Sensor Online" : "0 Sensors Online", 20, true));
+        status.addView(sensorCount, new LinearLayout.LayoutParams(0, -2, 1));
         maintenanceLink = ui.text(host.linkLabel(), 13, true);
         maintenanceLink.setPadding(ui.dp(10), ui.dp(6), ui.dp(10), ui.dp(6));
         maintenanceLink.setBackground(ui.shape(0x59A2B595, 40));
@@ -298,7 +370,8 @@ final class GardenPages {
         LinearLayout.LayoutParams linkParams = new LinearLayout.LayoutParams(-2, -2);
         linkParams.rightMargin = ui.dp(8);
         status.addView(maintenanceLink, linkParams);
-        Button pair = ui.button(host.linkUp() ? "Manage sensor" : "Pair Sensor", false, this::pair); pair.setTextSize(14);
+        maintenanceLink.setVisibility(host.linkUp() ? View.VISIBLE : View.GONE); // "0 Sensors Online" already says offline
+        Button pair = ui.button(host.linkUp() ? "Manage sensor" : "Pair Sensor", false, this::pair); pair.setTextSize(14); pairButton = pair;
         ui.clickable(pair, ui.sage, 26, this::pair); pair.setTextColor(ui.olive); pair.setElevation(ui.dp(3));
         pair.setMinWidth(0); pair.setMinimumWidth(0); pair.setPadding(ui.dp(16), 0, ui.dp(16), 0);
         status.addView(pair, new LinearLayout.LayoutParams(-2, ui.dp(48))); ui.add(column, status); ui.gap(column, 22);
@@ -409,7 +482,11 @@ final class GardenPages {
         if (maintenanceLink != null) {
             maintenanceLink.setText(host.linkLabel());
             maintenanceLink.setContentDescription("Connection " + host.linkLabel());
+            maintenanceLink.setVisibility(host.linkUp() ? View.VISIBLE : View.GONE);
         }
+        // The header is built once per render; keep it in step with links that come up or drop while it's open.
+        if (sensorCount != null) sensorCount.setText(host.linkUp() ? "1 Sensor Online" : "0 Sensors Online");
+        if (pairButton != null) pairButton.setText(host.linkUp() ? "Manage sensor" : "Pair Sensor");
         if (extraReadings != null) {
             String extras = fresh ? sensorExtras(host.telemetry) : "";
             extraReadings.setText(extras);
@@ -428,7 +505,7 @@ final class GardenPages {
     }
     private void appendReading(StringBuilder text, String label, Double value, int decimals) {
         if (value == null) return;
-        if (text.length() > 0) text.append(" · ");
+        if (text.length() > 0) text.append(", ");
         text.append(label).append(' ').append(String.format(Locale.getDefault(), decimals == 1 ? "%.1f" : "%.0f", value));
     }
     void commandResult(boolean success, String message) {
@@ -466,7 +543,7 @@ final class GardenPages {
         else buildOfflinePairing();
     }
     private String pairStatusText() {
-        if (host.setupStatus != null && host.bleOnline()) return host.linkLabel() + " · " + host.setupStatus.deviceId
+        if (host.setupStatus != null && host.bleOnline()) return host.linkLabel() + ", " + host.setupStatus.deviceId
                 + "\nSetup: " + host.setupStatus.stage.replace('_', ' ')
                 + (host.setupStatus.mqttReady ? "\nNode MQTT ready" : "\nBluetooth available; MQTT not ready");
         if (host.mqttOnline()) return "MQTT";

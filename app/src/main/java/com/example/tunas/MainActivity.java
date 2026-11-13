@@ -43,6 +43,12 @@ public class MainActivity extends androidx.appcompat.app.AppCompatActivity {
     com.example.tunas.iot.MqttSettingsStore mqttSettings;
     com.example.tunas.iot.Telemetry telemetry;
     long receivedAt;
+    com.example.tunas.data.SensorHistory history;
+    // Shared by the Home cards and the history screen, in SensorHistory's column order.
+    static final String[] METRIC_LABELS = {"Health", "Moisture", "Nutrient", "Sunlight", "Temp", "Humidity"};
+    static final String[] METRIC_UNITS = {"%", "%", " µS/cm", "%", "°C", "%"};
+    static final int[] METRIC_ICONS = {R.drawable.figma_plant, R.drawable.figma_moisture, R.drawable.figma_nutrient,
+        R.drawable.figma_sun, R.drawable.figma_temperature, R.drawable.figma_humidity};
     private final com.example.tunas.iot.TransportReadings readings = new com.example.tunas.iot.TransportReadings();
     private com.example.tunas.iot.TransportReadings.Route commandRoute;
     com.example.tunas.iot.NodeSetupStatus setupStatus;
@@ -59,7 +65,7 @@ public class MainActivity extends androidx.appcompat.app.AppCompatActivity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        ui = new TunasUi(this); store = new AppStore(this); pages = new GardenPages(this);
+        ui = new TunasUi(this); store = new AppStore(this); history = new com.example.tunas.data.SensorHistory(this); pages = new GardenPages(this);
         linkedRoom = getSharedPreferences("device_assignment", MODE_PRIVATE).getString("room", "");
         device = new com.example.tunas.iot.BleDeviceClient(this, new com.example.tunas.iot.BleDeviceClient.Listener() {
             public void onStatus(String message) { connectionStatus = message; pages.connectionChanged(); refreshReadings(); }
@@ -69,7 +75,7 @@ public class MainActivity extends androidx.appcompat.app.AppCompatActivity {
                 pages.connectionChanged(); refreshReadings();
             }
             public void onTelemetry(com.example.tunas.iot.Telemetry value) {
-                readings.ble(value, android.os.SystemClock.elapsedRealtime()); refreshReadings();
+                readings.ble(value, android.os.SystemClock.elapsedRealtime()); remember(value); refreshReadings();
             }
             public void onCommandResult(boolean success, String message) { commandRoute = null; pages.commandResult(success, message); }
             public void onSetupStatus(com.example.tunas.iot.NodeSetupStatus status) { nodeSetupChanged(status); }
@@ -86,7 +92,7 @@ public class MainActivity extends androidx.appcompat.app.AppCompatActivity {
                 pages.connectionChanged(); refreshReadings();
             }
             public void onTelemetry(com.example.tunas.iot.Telemetry value) {
-                readings.mqtt(value, android.os.SystemClock.elapsedRealtime()); refreshReadings();
+                readings.mqtt(value, android.os.SystemClock.elapsedRealtime()); remember(value); refreshReadings();
             }
             public void onCommandResult(boolean success, String message) { commandRoute = null; pages.commandResult(success, message); }
         });
@@ -116,6 +122,7 @@ public class MainActivity extends androidx.appcompat.app.AppCompatActivity {
                 case "editPlant": pages.editPlant(plantId); break;
                 case "addRoom": pages.roomForm(pages::maintenance); break;
                 case "tasks": pages.tasks(); break;
+                case "history": pages.history(pages.historyMetric); break;
                 case "settings": pages.settings(); break;
                 case "pair": pages.pair(); break;
                 default: showHome();
@@ -254,14 +261,15 @@ public class MainActivity extends androidx.appcompat.app.AppCompatActivity {
         metricStatus.setBackground(ui.shape(0x59A2B595, 40));
         metricStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         heading.addView(metricStatus, new LinearLayout.LayoutParams(-2, -2)); ui.add(column, heading); ui.gap(column, 14);
-        String[] labels = {"Health", "Moisture", "Nutrient", "Sunlight", "Temp", "Humidity"};
-        int[] icons = {R.drawable.figma_plant, R.drawable.figma_moisture, R.drawable.figma_nutrient,
-            R.drawable.figma_sun, R.drawable.figma_temperature, R.drawable.figma_humidity};
+        String[] labels = METRIC_LABELS;
+        int[] icons = METRIC_ICONS;
         for (int row = 0; row < 3; row++) {
             LinearLayout line = ui.row();
             for (int col = 0; col < 2; col++) {
                 int index = row * 2 + col;
                 LinearLayout card = ui.row(); ui.card(card, 10, 5); ui.pad(card, 12); card.setMinimumHeight(ui.dp(104));
+                // Tap a reading to see how it changed over the last day or week.
+                ui.clickable(card, ui.surface, 10, () -> pages.history(index)); card.setContentDescription(labels[index] + " history");
                 card.addView(ui.image(icons[index]), new LinearLayout.LayoutParams(ui.dp(50), ui.dp(62)));
                 LinearLayout copy = ui.column(); copy.setPadding(ui.dp(12), 0, 0, 0);
                 metrics[index] = ui.lifted(ui.text("--", 30, true));
@@ -367,7 +375,7 @@ public class MainActivity extends androidx.appcompat.app.AppCompatActivity {
                 if (saved != null && !saved.deviceId.equals(status.deviceId)) { mqtt.disconnect(); readings.clearMqtt(); }
                 else if (saved != null && status.mqttReady && "ready".equals(status.stage)) nextMqttAttempt = 0;
             }
-            connectionStatus = "Setup: " + status.stage.replace('_', ' ') + (status.mqttReady ? "" : " · Bluetooth available");
+            connectionStatus = "Setup: " + status.stage.replace('_', ' ') + (status.mqttReady ? "" : ", Bluetooth available");
         } catch (IllegalStateException failure) { connectionStatus = failure.getMessage(); }
         pages.connectionChanged(); refreshReadings();
     }
@@ -387,6 +395,10 @@ public class MainActivity extends androidx.appcompat.app.AppCompatActivity {
                 && checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
             nextBleAttempt = now + 30_000; device.reconnectBonded(address);
         }
+    }
+    /** Both transports call this; SensorHistory's saving rule keeps one reading from landing twice. */
+    private void remember(com.example.tunas.iot.Telemetry value) {
+        if (history.record(value) && screen.equals("history")) pages.renderHistory();
     }
     private void refreshSelectedReading() {
         com.example.tunas.iot.TransportReadings.Route route = route();
